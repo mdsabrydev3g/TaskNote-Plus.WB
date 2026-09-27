@@ -19,7 +19,6 @@ const securityHeaders = [
       "font-src 'self' data: https://fonts.gstatic.com",
       "img-src 'self' data: blob: https:",
       "connect-src 'self' https:",
-      "connect-src 'self' https:",
       "frame-ancestors 'self'",
       "base-uri 'self'",
       "form-action 'self'",

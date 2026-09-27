@@ -55,7 +55,10 @@ export function resolveProvider(): ProviderConfig | null {
     {
       id: "groq",
       label: "Groq",
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+      // Groq retires model names periodically and access is per-account, so the
+      // default is overridable with GROQ_MODEL. `openai/gpt-oss-120b` is the
+      // current flagship and is reachable on free-tier keys.
+      model: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
       configured: Boolean(process.env.GROQ_API_KEY?.trim()),
     },
     {
@@ -94,6 +97,28 @@ export function aiStatus() {
   };
 }
 
+/**
+ * Fallback chat models per provider. Groq in particular retires model names
+ * with little notice, and a key may lack access to the configured default.
+ * If the primary model answers with `model_not_found` we retry down this list
+ * rather than failing the user's request outright.
+ */
+const FALLBACK_MODELS: Record<ProviderId, string[]> = {
+  groq: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "allam-2-7b"],
+  google: ["gemini-2.0-flash", "gemini-1.5-flash"],
+  openrouter: [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+  ],
+  ollama: [],
+};
+
+/** True when a provider error means "this model name is not usable here". */
+function isModelUnavailable(message: string): boolean {
+  return /model_not_found|does not exist|not have access|not found|404/i.test(message);
+}
+
 /** Provider-agnostic entry point. Never throws — failures come back in-band. */
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
   const provider = resolveProvider();
@@ -112,41 +137,56 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     };
   }
 
-  try {
-    switch (provider.id) {
-      case "groq":
-        return await callOpenAICompatible(
-          "https://api.groq.com/openai/v1/chat/completions",
-          process.env.GROQ_API_KEY!,
-          provider,
-          options,
-          started,
-        );
-      case "openrouter":
-        return await callOpenAICompatible(
-          "https://openrouter.ai/api/v1/chat/completions",
-          process.env.OPENROUTER_API_KEY!,
-          provider,
-          options,
-          started,
-        );
-      case "google":
-        return await callGoogle(provider, options, started);
-      case "ollama":
-        return await callOllama(provider, options, started);
+  // Try the configured model first, then the fallbacks (deduplicated).
+  const attempts = [provider.model, ...FALLBACK_MODELS[provider.id]].filter(
+    (m, i, all) => m && all.indexOf(m) === i,
+  );
+
+  let lastError = "Unknown AI error";
+
+  for (const model of attempts) {
+    const attempt: ProviderConfig = { ...provider, model };
+    try {
+      switch (provider.id) {
+        case "groq":
+          return await callOpenAICompatible(
+            "https://api.groq.com/openai/v1/chat/completions",
+            process.env.GROQ_API_KEY!,
+            attempt,
+            options,
+            started,
+          );
+        case "openrouter":
+          return await callOpenAICompatible(
+            "https://openrouter.ai/api/v1/chat/completions",
+            process.env.OPENROUTER_API_KEY!,
+            attempt,
+            options,
+            started,
+          );
+        case "google":
+          return await callGoogle(attempt, options, started);
+        case "ollama":
+          return await callOllama(attempt, options, started);
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Unknown AI error";
+      // Only a model-access problem is worth retrying with another model.
+      // Auth/rate-limit/network failures would fail identically on every model.
+      if (!isModelUnavailable(lastError)) break;
     }
-  } catch (error) {
-    return {
-      available: false,
-      text: "",
-      provider: provider.id,
-      model: provider.model,
-      tokensIn: 0,
-      tokensOut: 0,
-      latencyMs: Date.now() - started,
-      error: error instanceof Error ? error.message : "Unknown AI error",
-    };
   }
+
+  return {
+    available: false,
+    text: "",
+    provider: provider.id,
+    model: provider.model,
+    tokensIn: 0,
+    tokensOut: 0,
+    latencyMs: Date.now() - started,
+    error: lastError,
+  };
 }
 
 async function callOpenAICompatible(

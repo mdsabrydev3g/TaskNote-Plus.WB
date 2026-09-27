@@ -1,24 +1,20 @@
 import { NextResponse } from "next/server";
-import { sql } from "drizzle-orm";
-import { db } from "@/db";
+import { probeDatabase } from "@/db";
 import { aiStatus } from "@/lib/ai/gateway";
 
 /**
  * Health check for uptime monitoring and platform probes.
- * Reports database reachability and AI provider configuration — never any
- * user data, and never any secret value.
+ *
+ * Reports database reachability and AI provider configuration. When the
+ * database is unreachable it includes the underlying driver error and the name
+ * of the env var the credentials came from — that is what turns an opaque
+ * "unreachable" into an actionable diagnosis. Secrets are never included: only
+ * the variable *name*, and any connection string inside the error is redacted.
  */
 export async function GET() {
   const started = Date.now();
-  let database: "ok" | "unreachable" = "unreachable";
 
-  try {
-    await db.execute(sql`select 1`);
-    database = "ok";
-  } catch {
-    database = "unreachable";
-  }
-
+  const { database, source, error } = await probeDatabase();
   const ai = aiStatus();
 
   return NextResponse.json(
@@ -28,6 +24,8 @@ export async function GET() {
       version: "1.0.0",
       checks: {
         database,
+        databaseSource: source,
+        databaseError: error,
         aiConfigured: ai.available,
         aiProvider: ai.provider,
       },

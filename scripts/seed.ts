@@ -12,6 +12,7 @@ import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
+import { resolveConnectionString } from "../src/lib/db/connection";
 import {
   captures,
   events,
@@ -30,13 +31,18 @@ const DEMO_EMAIL = "demo@tasknote.app";
 const DEMO_PASSWORD = "Demo1234Pass";
 
 async function main() {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    console.error("DATABASE_URL is not set. Copy .env.example to .env.local first.");
+  const found = resolveConnectionString();
+  if (!found.url) {
+    console.error(
+      "No usable Postgres connection string found.\n" +
+        "  Locally: put your Neon URL in .env.local (see .env.example).",
+    );
     process.exit(1);
   }
 
-  const sql = neon(connectionString);
+  console.log(`Seeding via ${found.source}`);
+
+  const sql = neon(found.url);
   const db = drizzle(sql);
 
   console.log("Seeding TaskNote Plus demo data…");

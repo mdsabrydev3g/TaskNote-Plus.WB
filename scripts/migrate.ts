@@ -18,9 +18,15 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
+import { resolveMigrationConnection } from "../src/lib/db/connection";
 
 const MIGRATIONS_DIR = resolve(process.cwd(), "drizzle");
 const LEDGER_TABLE = "_tasknote_migrations";
+
+// Postgres does not allow parameters in DDL identifiers (`CREATE TABLE $1`
+// is a syntax error), so the name is interpolated as an unsafe identifier.
+// It is a compile-time constant, so this is not an injection risk.
+const LEDGER_IDENT = `"${LEDGER_TABLE}"`;
 
 function fail(message: string): never {
   console.error(`\n✖ ${message}\n`);
@@ -28,14 +34,18 @@ function fail(message: string): never {
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
+  const found = resolveMigrationConnection();
+  if (!found.url) {
     fail(
-      "DATABASE_URL is not set.\n" +
-        "  Copy .env.example to .env.local and paste the pooled connection string\n" +
-        "  from your Neon dashboard (Connection Details → Pooled connection).",
+      "No usable Postgres connection string found.\n" +
+        "  Locally: copy .env.example to .env.local and paste the connection string\n" +
+        "           from your Neon dashboard (Connection Details).\n" +
+        "  On Vercel: attach the Neon integration, or set DATABASE_URL in the project.",
     );
   }
+
+  console.log(`→ using connection from ${found.source}`);
+  const url = found.url;
 
   if (!existsSync(MIGRATIONS_DIR)) {
     fail(
@@ -55,15 +65,17 @@ async function main() {
   const sql = neon(url);
 
   // --- Ensure the ledger exists -------------------------------------------------
-  await sql`
-    CREATE TABLE IF NOT EXISTS ${sql(LEDGER_TABLE)} (
+  // `sql(str)` sends the statement as-is with no parameters. The ledger name is
+  // a compile-time constant, so interpolating it here is safe.
+  await sql(
+    `CREATE TABLE IF NOT EXISTS ${LEDGER_IDENT} (
       name        text PRIMARY KEY,
       checksum    text NOT NULL,
       applied_at  timestamptz NOT NULL DEFAULT now()
-    )
-  `;
+    )`,
+  );
 
-  const applied = (await sql`SELECT name, checksum FROM ${sql(LEDGER_TABLE)}`) as Array<{
+  const applied = (await sql(`SELECT name, checksum FROM ${LEDGER_IDENT}`)) as Array<{
     name: string;
     checksum: string;
   }>;
@@ -114,11 +126,11 @@ async function main() {
       }
     }
 
-    await sql`
-      INSERT INTO ${sql(LEDGER_TABLE)} (name, checksum)
-      VALUES (${file}, ${checksum})
-      ON CONFLICT (name) DO NOTHING
-    `;
+    await sql(
+      `INSERT INTO ${LEDGER_IDENT} (name, checksum) VALUES ($1, $2)
+       ON CONFLICT (name) DO NOTHING`,
+      [file, checksum],
+    );
 
     ran += 1;
     console.log(`  ✓ ${file} applied`);

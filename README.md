@@ -72,6 +72,25 @@ npm run dev           # http://localhost:3000
 
 Providers are tried in order **Groq → Google → OpenRouter → Ollama**, skipping any that are unset.
 
+### Where the database URL is read from
+
+The app resolves its connection string from the first *usable* variable it finds, in this order:
+
+1. `DATABASE_URL`
+2. `POSTGRES_URL` / `NEON_DATABASE_URL`
+3. A Vercel Neon integration name, e.g. `MYAPP_DB_DATABASE_URL`
+4. Any other variable ending in `POSTGRES_URL` / `DATABASE_URL`
+
+This matters because attaching a database through the Vercel Neon integration stores the credentials
+under a **project-prefixed** name, not `DATABASE_URL`. A hard-coded lookup would leave the app
+reporting "database unreachable" even though the integration was attached successfully. Values that
+are blank, still hold a placeholder, or are unpooled are skipped for the runtime path.
+
+`GET /api/health` reports which variable won (`checks.databaseSource`) and the underlying driver error
+(`checks.databaseError`) when the connection fails — so a misconfiguration is diagnosable from the
+deployed app without shell access.
+
+
 ---
 
 ## Deploying to Vercel + Neon
@@ -191,8 +210,10 @@ trade-offs involved.
 | `npm run build` / `start` | Production build and serve. |
 | `npm run typecheck` | `tsc --noEmit`. |
 | `npm run lint` | ESLint (next/core-web-vitals + typescript). |
-| `npm run db:generate` | Generate SQL from `src/db/schema.ts`. |
+| `npm run db:generate` | Generate SQL from `src/db/schema.ts`, then refresh the bundled copy. |
 | `npm run db:migrate` | Apply migrations (idempotent, checksummed). |
+| `npm run db:check` | Read-only: report the connection source and list existing tables. |
+| `npm run db:bundle` | Re-inline `drizzle/*.sql` into `src/lib/db/migrations/bundle.ts`. |
 | `npm run db:push` | Push schema directly — prototyping only, skips migration history. |
 | `npm run db:seed` | Load demo data. |
 | `npm run db:studio` | Drizzle Studio data browser. |

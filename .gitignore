@@ -36,3 +36,6 @@ yarn-error.log*
 # NOTE: drizzle/meta IS committed on purpose — it holds the migration journal and
 # per-migration snapshots. Without it, the next `drizzle-kit generate` cannot diff
 # correctly and will emit broken migrations.
+
+.vercel
+.env*

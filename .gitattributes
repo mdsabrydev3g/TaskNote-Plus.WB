@@ -1,0 +1,15 @@
+# Normalize line endings so Windows, macOS and Linux contributors and CI agree.
+* text=auto eol=lf
+
+# Binary assets must never be normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Generated migration artifacts: keep them diffable and out of merge noise.
+drizzle/** -diff linguist-generated=true
+package-lock.json -diff linguist-generated=true

@@ -881,7 +881,10 @@ export async function deleteThreadAction(threadId: string): Promise<AiResult> {
 
 // ── Permissions & memory (§8.1 / §9.3) ──────────────────────────────────────
 
-export const AI_SCOPES = [
+// Module-private by design: a "use server" file may only export async
+// functions, so this table must not be exported (it would break the whole
+// route at runtime with "can only export async functions, found object").
+const AI_SCOPES = [
   { scope: "notes:read", labelAr: "قراءة الملاحظات", labelEn: "Read notes" },
   { scope: "tasks:read", labelAr: "قراءة المهام", labelEn: "Read tasks" },
   { scope: "calendar:read", labelAr: "قراءة التقويم", labelEn: "Read calendar" },

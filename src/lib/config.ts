@@ -23,6 +23,21 @@ export const SEARCH_SEMANTIC_TARGET_MS = 800;
 /** §8.2 AI writes stay undoable for at least 24h. */
 export const AI_REVERSIBLE_HOURS = 48;
 
+/**
+ * Assistant behaviour:
+ *  - "general"  (default) — a full personal assistant. Answers from its own
+ *                knowledge AND from the workspace, and can create events,
+ *                tasks and notes on request.
+ *  - "grounded" (opt-in)  — the original strict mode: answers only from the
+ *                user's own workspace content and never uses general knowledge.
+ * Set ASSISTANT_MODE=grounded to restore the strict behaviour.
+ */
+export const ASSISTANT_MODE: "general" | "grounded" =
+  process.env.ASSISTANT_MODE === "grounded" ? "grounded" : "general";
+
+/** Tool use (creating events/tasks/notes from chat) is enabled in general mode. */
+export const ASSISTANT_TOOLS_ENABLED = ASSISTANT_MODE === "general";
+
 /** §12 notifications are batched by default. */
 export const QUIET_HOURS_DEFAULT = { start: 22, end: 7 };
 

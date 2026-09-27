@@ -1,6 +1,6 @@
 "use server";
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, ne } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import {
@@ -9,6 +9,7 @@ import {
   captures,
   chatMessages,
   chatThreads,
+  events,
   goals,
   notes,
   permissionGrants,
@@ -18,14 +19,20 @@ import {
 } from "@/db/schema";
 import { UserScope, assertOwnership } from "@/lib/db/scope";
 import { requireUser } from "@/lib/session";
-import { generate, aiStatus, parseJsonLoose } from "@/lib/ai/gateway";
+import { generate, aiStatus, parseJsonLoose, resolveProvider, supportsTools, type ChatMessage } from "@/lib/ai/gateway";
+import { TOOL_DEFINITIONS, runTool } from "@/lib/ai/tools";
 import {
   DATA_BOUNDARY_INSTRUCTION,
+  GENERAL_ASSISTANT_INSTRUCTION,
   detectPiiCategories,
   fenceUntrusted,
 } from "@/lib/ai/safety";
 import { chatInputSchema } from "@/lib/validation";
-import { AI_REVERSIBLE_HOURS } from "@/lib/config";
+import {
+  AI_REVERSIBLE_HOURS,
+  ASSISTANT_MODE,
+  ASSISTANT_TOOLS_ENABLED,
+} from "@/lib/config";
 
 export type AiResult<T = unknown> = {
   ok: boolean;
@@ -47,12 +54,12 @@ const SYSTEM_PROMPT = [
   "You are the TaskNote Plus assistant — a productivity assistant for one person's private workspace.",
   "You help with planning, summarising, extracting action items, and answering questions about the user's own notes, tasks, projects and goals.",
   "",
-  DATA_BOUNDARY_INSTRUCTION,
+  ASSISTANT_MODE === "general" ? GENERAL_ASSISTANT_INSTRUCTION : DATA_BOUNDARY_INSTRUCTION,
   "",
   "Style: concise, specific, no filler. Match the user's language (Arabic or English).",
   "Arabic responses should read as natural Modern Standard Arabic unless the user writes in a dialect, in which case mirror their tone.",
   "When you list action items, prefer short imperative sentences.",
-  "If you do not have enough context to answer, say so plainly — do not invent details about the user's data.",
+  "Never invent details about the user's own data — if the workspace does not contain it, say so.",
 ].join("\n");
 
 async function logAiAction(params: {
@@ -629,51 +636,248 @@ async function retrieveContext(userId: string, query: string, limit = 8) {
 
   if (terms.length === 0) return [];
 
-  const noteRows = await db
-    .select({ id: notes.id, title: notes.title, text: notes.contentText })
-    .from(notes)
-    .where(and(scope.where(notes), eq(notes.aiAccessible, true)))
-    .orderBy(desc(notes.updatedAt))
-    .limit(120);
-
-  const taskRows = await db
-    .select({ id: tasks.id, title: tasks.title, description: tasks.description, status: tasks.status })
-    .from(tasks)
-    .where(and(scope.where(tasks), eq(tasks.aiAccessible, true)))
-    .orderBy(desc(tasks.updatedAt))
-    .limit(120);
+  const [noteRows, taskRows, eventRows, captureRows, projectRows, goalRows] = await Promise.all([
+    db
+      .select({ id: notes.id, title: notes.title, text: notes.contentText })
+      .from(notes)
+      .where(and(scope.where(notes), eq(notes.aiAccessible, true)))
+      .orderBy(desc(notes.updatedAt))
+      .limit(150),
+    db
+      .select({
+        id: tasks.id,
+        title: tasks.title,
+        description: tasks.description,
+        status: tasks.status,
+        dueAt: tasks.dueAt,
+        priority: tasks.priority,
+      })
+      .from(tasks)
+      .where(and(scope.where(tasks), eq(tasks.aiAccessible, true)))
+      .orderBy(desc(tasks.updatedAt))
+      .limit(150),
+    db
+      .select({
+        id: events.id,
+        title: events.title,
+        description: events.description,
+        location: events.location,
+        startAt: events.startAt,
+        endAt: events.endAt,
+      })
+      .from(events)
+      .where(and(scope.where(events), eq(events.aiAccessible, true)))
+      .orderBy(desc(events.startAt))
+      .limit(150),
+    // The inbox is included so a freshly captured item is answerable before
+    // it has been triaged into a note or task.
+    db
+      .select({
+        id: captures.id,
+        raw: captures.raw,
+        processed: captures.processed,
+        createdAt: captures.createdAt,
+        suggestedTitle: captures.suggestedTitle,
+      })
+      .from(captures)
+      .where(scope.where(captures))
+      .orderBy(desc(captures.createdAt))
+      .limit(100),
+    db
+      .select({ id: projects.id, name: projects.name, description: projects.description, status: projects.status })
+      .from(projects)
+      .where(and(scope.where(projects), eq(projects.aiAccessible, true)))
+      .orderBy(desc(projects.updatedAt))
+      .limit(60),
+    db
+      .select({
+        id: goals.id,
+        title: goals.title,
+        description: goals.description,
+        status: goals.status,
+        dueDate: goals.dueDate,
+      })
+      .from(goals)
+      .where(and(scope.where(goals), eq(goals.aiAccessible, true)))
+      .orderBy(desc(goals.updatedAt))
+      .limit(60),
+  ]);
 
   const scored: Array<{ label: string; sourceType: string; sourceId: string; text: string; score: number }> = [];
 
+  const score = (haystack: string) =>
+    terms.reduce((acc, term) => acc + (haystack.split(term).length - 1), 0);
+
+  const push = (
+    label: string,
+    sourceType: string,
+    sourceId: string,
+    haystack: string,
+    text: string,
+  ) => {
+    const s = score(haystack.toLowerCase());
+    if (s > 0) scored.push({ label, sourceType, sourceId, text: text.slice(0, 4000), score: s });
+  };
+
   for (const n of noteRows) {
-    const haystack = `${n.title}\n${n.text}`.toLowerCase();
-    const score = terms.reduce((acc, term) => acc + (haystack.split(term).length - 1), 0);
-    if (score > 0) {
-      scored.push({
-        label: n.title || "Untitled note",
-        sourceType: "note",
-        sourceId: n.id,
-        text: `${n.title}\n${n.text}`.slice(0, 4000),
-        score,
-      });
-    }
+    push(n.title || "Untitled note", "note", n.id, `${n.title}\n${n.text}`, `${n.title}\n${n.text}`);
   }
 
   for (const t of taskRows) {
-    const haystack = `${t.title}\n${t.description ?? ""}`.toLowerCase();
-    const score = terms.reduce((acc, term) => acc + (haystack.split(term).length - 1), 0);
-    if (score > 0) {
-      scored.push({
-        label: t.title,
-        sourceType: "task",
-        sourceId: t.id,
-        text: `Task: ${t.title} [${t.status}]${t.description ? `\n${t.description}` : ""}`,
-        score,
-      });
-    }
+    const when = t.dueAt ? ` · due ${t.dueAt.toISOString()}` : "";
+    push(
+      t.title,
+      "task",
+      t.id,
+      `${t.title}\n${t.description ?? ""}`,
+      `Task: ${t.title} [${t.status}, ${t.priority}${when}]${t.description ? `\n${t.description}` : ""}`,
+    );
+  }
+
+  for (const e of eventRows) {
+    const when = `${e.startAt.toISOString()} → ${e.endAt.toISOString()}`;
+    push(
+      e.title,
+      "event",
+      e.id,
+      `${e.title}\n${e.description ?? ""}\n${e.location ?? ""}`,
+      `Event: ${e.title} [${when}]${e.location ? `\nLocation: ${e.location}` : ""}${e.description ? `\n${e.description}` : ""}`,
+    );
+  }
+
+  for (const c of captureRows) {
+    const label = c.suggestedTitle || c.raw.slice(0, 60);
+    push(
+      label,
+      "capture",
+      c.id,
+      c.raw,
+      `Inbox item (${c.processed ? "triaged" : "not yet triaged"}): ${c.raw}`,
+    );
+  }
+
+  for (const p of projectRows) {
+    push(
+      p.name,
+      "project",
+      p.id,
+      `${p.name}\n${p.description ?? ""}`,
+      `Project: ${p.name} [${p.status}]${p.description ? `\n${p.description}` : ""}`,
+    );
+  }
+
+  for (const g of goalRows) {
+    const target = g.dueDate ? ` · due ${g.dueDate.toISOString()}` : "";
+    push(
+      g.title,
+      "goal",
+      g.id,
+      `${g.title}\n${g.description ?? ""}`,
+      `Goal: ${g.title} [${g.status}${target}]${g.description ? `\n${g.description}` : ""}`,
+    );
   }
 
   return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+/**
+ * A precise, date-scoped snapshot injected whenever the question looks
+ * time-bound ("what's on today", "my tasks this week"). Lexical scoring cannot
+ * answer these reliably because the user rarely types the task's own words.
+ */
+async function buildAgenda(userId: string) {
+  const scope = new UserScope(userId);
+  const now = new Date();
+  const endOfDay = new Date(now);
+  endOfDay.setHours(23, 59, 59, 999);
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const weekAhead = new Date(now.getTime() + 7 * 86_400_000);
+
+  const [dueToday, overdue, nextEvents, openNow] = await Promise.all([
+    db
+      .select({ title: tasks.title, status: tasks.status, priority: tasks.priority, dueAt: tasks.dueAt })
+      .from(tasks)
+      .where(
+        and(
+          scope.where(tasks),
+          ne(tasks.status, "done"),
+          ne(tasks.status, "cancelled"),
+          isNotNull(tasks.dueAt),
+          lte(tasks.dueAt, endOfDay),
+          gte(tasks.dueAt, startOfDay),
+        ),
+      )
+      .orderBy(asc(tasks.dueAt))
+      .limit(50),
+    db
+      .select({ title: tasks.title, status: tasks.status, dueAt: tasks.dueAt })
+      .from(tasks)
+      .where(
+        and(
+          scope.where(tasks),
+          ne(tasks.status, "done"),
+          ne(tasks.status, "cancelled"),
+          isNotNull(tasks.dueAt),
+          lt(tasks.dueAt, startOfDay),
+        ),
+      )
+      .orderBy(asc(tasks.dueAt))
+      .limit(50),
+    db
+      .select({ title: events.title, startAt: events.startAt, endAt: events.endAt, location: events.location })
+      .from(events)
+      .where(and(scope.where(events), gte(events.startAt, startOfDay), lte(events.startAt, weekAhead)))
+      .orderBy(asc(events.startAt))
+      .limit(50),
+    db
+      .select({ title: tasks.title, status: tasks.status, priority: tasks.priority })
+      .from(tasks)
+      .where(and(scope.where(tasks), inArray(tasks.status, ["todo", "in_progress", "blocked"])))
+      .orderBy(asc(tasks.priority))
+      .limit(50),
+  ]);
+
+  const lines: string[] = [
+    `Current local time: ${now.toISOString()}`,
+    `Today: ${startOfDay.toISOString().slice(0, 10)}`,
+    "",
+  ];
+
+  lines.push(
+    `Tasks due today (${dueToday.length}):`,
+    ...(dueToday.length
+      ? dueToday.map((t) => `- ${t.title} [${t.priority}, ${t.status}] due ${t.dueAt!.toISOString()}`)
+      : ["- (none)"]),
+  );
+  lines.push(
+    "",
+    `Overdue tasks (${overdue.length}):`,
+    ...(overdue.length ? overdue.map((t) => `- ${t.title} [${t.status}] was due ${t.dueAt!.toISOString()}`) : ["- (none)"]),
+  );
+  lines.push(
+    "",
+    `Upcoming events, next 7 days (${nextEvents.length}):`,
+    ...(nextEvents.length
+      ? nextEvents.map(
+          (e) => `- ${e.title} · ${e.startAt.toISOString()} → ${e.endAt.toISOString()}${e.location ? ` @ ${e.location}` : ""}`,
+        )
+      : ["- (none)"]),
+  );
+  lines.push(
+    "",
+    `Other open tasks (${openNow.length}):`,
+    ...(openNow.length ? openNow.map((t) => `- ${t.title} [${t.priority}, ${t.status}]`) : ["- (none)"]),
+  );
+
+  return lines.join("\n");
+}
+
+/** Does the question look like it is asking about a time window? */
+function wantsAgenda(text: string): boolean {
+  return /today|tonight|tomorrow|this week|next week|agenda|schedule|upcoming|overdue|due|النهاردة|اليوم|بكرة|غدا|غداً|هذا الأسبوع|الأسبوع|القادم|المتأخرة|متأخر|جدولي|مواعيدي|مهامي/i.test(
+    text,
+  );
 }
 
 export async function askAssistantAction(
@@ -752,40 +956,115 @@ export async function askAssistantAction(
   const contextBlock =
     chunks.length > 0
       ? chunks.map((c) => fenceUntrusted(c.label, c.text)).join("\n\n")
-      : "(no matching workspace content was found)";
+      : "(the workspace has no content matching this question)";
 
   const piiNote =
     detectPiiCategories(message + contextBlock).length > 0
       ? "\nNote: the workspace content may contain personal identifiers. Refer to them only as needed to answer."
       : "";
 
-  const result = await generate({
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...ordered,
-      {
-        role: "user",
-        content: [
-          mode === "summarize"
-            ? "Summarise the relevant workspace content below."
-            : mode === "extract_tasks"
-              ? "From the workspace content below, list concrete action items as short imperative bullets."
-              : "Answer the question using only the workspace content below.",
-          "If the content does not contain the answer, say plainly that you could not find it in the workspace.",
-          "Do not reference sources that are not listed below.",
-          piiNote,
-          "",
-          `Question: ${message}`,
-          contextNoteId ? `(The user pointed at note ${contextNoteId} for context.)` : "",
-          "",
-          "Workspace content:",
-          contextBlock,
-        ].join("\n"),
-      },
-    ],
+  const timeBound = wantsAgenda(message);
+  const agendaBlock = timeBound ? await buildAgenda(user.id) : "";
+
+  const toolsEnabled =
+    ASSISTANT_TOOLS_ENABLED && supportsTools(resolveProvider()?.id ?? "ollama");
+
+  const taskLine =
+    mode === "summarize"
+      ? "Summarise the relevant workspace content below."
+      : mode === "extract_tasks"
+        ? "From the workspace content below, list concrete action items as short imperative bullets."
+        : "Answer the user's question.";
+
+  const userTurn = [
+    taskLine,
+    mode === "chat" ? "Use the workspace content for anything about the user's own notes, tasks, projects, goals, inbox or calendar, and cite the source labels." : "",
+    mode === "chat" ? "For anything else, answer from your own knowledge — do not refuse just because the workspace is empty." : "",
+    "Never reference sources that are not listed below.",
+    piiNote,
+    agendaBlock ? `\nLive agenda snapshot (authoritative — prefer this over guessing dates):\n${agendaBlock}` : "",
+    "",
+    `User: ${message}`,
+    contextNoteId ? `(The user pointed at note ${contextNoteId} for context.)` : "",
+    "",
+    "Workspace content:",
+    contextBlock,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const conversation: ChatMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...ordered,
+    { role: "user", content: userTurn },
+  ];
+
+  const toolSummaries: string[] = [];
+  let result = await generate({
+    messages: conversation,
     temperature: 0.35,
     maxTokens: 1400,
+    ...(toolsEnabled
+      ? {
+          tools: TOOL_DEFINITIONS.map((t) => ({
+            type: "function" as const,
+            function: { name: t.name, description: t.description, parameters: t.parameters },
+          })),
+          toolChoice: "auto" as const,
+        }
+      : {}),
   });
+
+  // ── Tool-calling loop ─────────────────────────────────────────────────────
+  // Bounded to 3 rounds: enough for "book it then tell me what you did",
+  // small enough that a confused model cannot spin.
+  for (let round = 0; round < 3 && result.available && result.toolCalls.length > 0; round++) {
+    conversation.push({
+      role: "assistant",
+      content: result.text,
+      tool_calls: result.toolCalls,
+    });
+
+    for (const call of result.toolCalls) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+
+      const outcome = await runTool(call.function.name, args, {
+        userId: user.id,
+        timezone: user.timezone || "UTC",
+        provider: result.provider,
+        model: result.model,
+      });
+
+      if (outcome.ok && outcome.summary) toolSummaries.push(outcome.summary);
+
+      conversation.push({
+        role: "tool",
+        tool_call_id: call.id,
+        name: call.function.name,
+        content: outcome.forModel || (outcome.ok ? "done" : "the tool failed"),
+      });
+    }
+
+    result = await generate({
+      messages: conversation,
+      temperature: 0.35,
+      maxTokens: 1400,
+      ...(toolsEnabled
+        ? {
+            tools: TOOL_DEFINITIONS.map((t) => ({
+              type: "function" as const,
+              function: { name: t.name, description: t.description, parameters: t.parameters },
+            })),
+            toolChoice: "auto" as const,
+          }
+        : {}),
+    });
+  }
 
   await logAiAction({
     userId: user.id,
@@ -797,12 +1076,27 @@ export async function askAssistantAction(
     tokensOut: result.tokensOut,
     latencyMs: result.latencyMs,
     outcome: result.available ? "success" : "failed",
-    payload: { mode, citationCount: citations.length },
+    payload: { mode, citationCount: citations.length, toolWrites: toolSummaries },
   });
 
-  const answer = result.available
+  let answer = result.available
     ? result.text
     : "The AI provider did not respond. Your data is safe and unchanged — please try again in a moment.";
+
+  // If the model did work but returned no narration, say what happened rather
+  // than leaving the user with an empty bubble.
+  if (answer.trim().length === 0 && toolSummaries.length > 0) {
+    answer = toolSummaries.join("\n");
+  }
+
+  // Tool-created rows are new citable sources, so refresh the calendar/notes
+  // surfaces the user may be looking at.
+  if (toolSummaries.length > 0) {
+    revalidatePath("/calendar");
+    revalidatePath("/tasks");
+    revalidatePath("/notes");
+    revalidatePath("/dashboard");
+  }
 
   await db.insert(chatMessages).values({
     threadId: activeThreadId,

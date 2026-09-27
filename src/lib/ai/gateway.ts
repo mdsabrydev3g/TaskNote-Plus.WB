@@ -17,8 +17,29 @@
 export type ProviderId = "groq" | "google" | "openrouter" | "ollama";
 
 export type ChatMessage = {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** Present on assistant turns that requested tools. */
+  tool_calls?: ToolCall[];
+  /** Present on `role: "tool"` turns, linking the result to its request. */
+  tool_call_id?: string;
+  name?: string;
+};
+
+export type ToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+/** Minimal OpenAI-style function schema, enough for chat-completions tools. */
+export type ToolSpec = {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
 };
 
 export type GenerateOptions = {
@@ -27,6 +48,9 @@ export type GenerateOptions = {
   maxTokens?: number;
   /** Ask the provider for strict JSON where supported. */
   json?: boolean;
+  /** Advertise callable tools (OpenAI-compatible providers only). */
+  tools?: ToolSpec[];
+  toolChoice?: "auto" | "none";
   signal?: AbortSignal;
 };
 
@@ -39,7 +63,14 @@ export type GenerateResult = {
   tokensOut: number;
   latencyMs: number;
   error?: string;
+  /** Tool calls the model asked for, if any. */
+  toolCalls: ToolCall[];
 };
+
+/** True when the provider speaks the OpenAI chat-completions wire format. */
+export function supportsTools(provider: ProviderId): boolean {
+  return provider === "groq" || provider === "openrouter";
+}
 
 type ProviderConfig = {
   id: ProviderId;
@@ -134,6 +165,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
       tokensOut: 0,
       latencyMs: 0,
       error: "No AI provider configured",
+      toolCalls: [],
     };
   }
 
@@ -186,6 +218,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     tokensOut: 0,
     latencyMs: Date.now() - started,
     error: lastError,
+    toolCalls: [],
   };
 }
 
@@ -211,6 +244,9 @@ async function callOpenAICompatible(
       temperature: options.temperature ?? 0.4,
       max_tokens: options.maxTokens ?? 1200,
       ...(options.json ? { response_format: { type: "json_object" } } : {}),
+      ...(options.tools && options.tools.length > 0
+        ? { tools: options.tools, tool_choice: options.toolChoice ?? "auto" }
+        : {}),
     }),
     signal: options.signal,
   });
@@ -221,18 +257,25 @@ async function callOpenAICompatible(
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{
+      message?: { content?: string | null; tool_calls?: ToolCall[] };
+      finish_reason?: string;
+    }>;
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
 
+  const message = data.choices?.[0]?.message;
+  const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+
   return {
     available: true,
-    text: data.choices?.[0]?.message?.content?.trim() ?? "",
+    text: (message?.content ?? "").trim(),
     provider: provider.id,
     model: provider.model,
     tokensIn: data.usage?.prompt_tokens ?? 0,
     tokensOut: data.usage?.completion_tokens ?? 0,
     latencyMs: Date.now() - started,
+    toolCalls,
   };
 }
 
@@ -245,8 +288,11 @@ async function callGoogle(
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${provider.model}:generateContent?key=${apiKey}`;
 
   const systemParts = options.messages.filter((m) => m.role === "system").map((m) => m.content);
+  // generateContent has no tool-call shape, so drop `tool` turns entirely rather
+  // than mapping them to "user" — mislabelling a tool result as a user message
+  // would make failover mid-tool-loop read as if the user said it.
   const contents = options.messages
-    .filter((m) => m.role !== "system")
+    .filter((m) => m.role !== "system" && m.role !== "tool")
     .map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
       parts: [{ text: m.content }],
@@ -288,6 +334,8 @@ async function callGoogle(
     tokensIn: data.usageMetadata?.promptTokenCount ?? 0,
     tokensOut: data.usageMetadata?.candidatesTokenCount ?? 0,
     latencyMs: Date.now() - started,
+    // Google's generateContent does not use the OpenAI tool-call shape.
+    toolCalls: [],
   };
 }
 
@@ -329,6 +377,7 @@ async function callOllama(
     tokensIn: data.prompt_eval_count ?? 0,
     tokensOut: data.eval_count ?? 0,
     latencyMs: Date.now() - started,
+    toolCalls: [],
   };
 }
 

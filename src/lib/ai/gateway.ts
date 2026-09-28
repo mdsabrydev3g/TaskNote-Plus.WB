@@ -105,7 +105,11 @@ function configuredProviders(): ProviderConfig[] {
     {
       id: "google",
       label: "Google AI",
-      model: process.env.GOOGLE_MODEL || "gemini-2.0-flash",
+      // Google retires dated snapshots for new keys (gemini-2.0-flash and
+      // gemini-2.5-flash now 404 with "no longer available to new users"). The
+      // `-latest` aliases are the stable choice: they track the current model
+      // instead of pinning a snapshot that will be withdrawn.
+      model: process.env.GOOGLE_MODEL || "gemini-flash-latest",
       configured: Boolean(process.env.GOOGLE_AI_API_KEY?.trim()),
     },
     {
@@ -184,7 +188,15 @@ const FALLBACK_MODELS: Record<ProviderId, string[]> = {
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
   ],
-  google: ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"],
+  // `-latest` aliases first so a retired snapshot cannot take the chain down,
+  // then a couple of explicit current models as a cross-check.
+  google: [
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite",
+  ],
   openrouter: [
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-2-9b-it:free",

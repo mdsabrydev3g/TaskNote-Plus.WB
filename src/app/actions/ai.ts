@@ -1,6 +1,6 @@
 "use server";
 
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import {
@@ -71,7 +71,12 @@ const SYSTEM_PROMPT = [
   "Style: concise, specific, no filler. Match the user's language (Arabic or English).",
   "Arabic responses should read as natural Modern Standard Arabic unless the user writes in a dialect, in which case mirror their tone.",
   "When you list action items, prefer short imperative sentences.",
-  "Never invent details about the user's own data — if the workspace does not contain it, say so.",
+  "Never invent details about the user's own data.",
+  "Counting and listing rules — these override any impression you get from the excerpts below:",
+  "- The 'Authoritative workspace counts' block states exact totals. Quote those numbers.",
+  "- If those counts show items exist, the section is NOT empty. Never report zero, and never say the workspace has no content, when a count is above zero.",
+  "- Absent excerpts mean the keyword search missed, not that the item does not exist. Say you could not find a matching excerpt, and still answer using the counts.",
+  "- If an area is marked 'not shared with the assistant', say you do not have permission to see it instead of reporting zero.",
 ].join("\n");
 
 async function logAiAction(params: {
@@ -921,6 +926,142 @@ function wantsAgenda(text: string): boolean {
   );
 }
 
+/**
+ * Does the question ask for a count or a total? ("how many tasks", "كم مهمة")
+ * Lexical retrieval cannot answer these: the user types a category word
+ * ("tasks") while the rows hold their own unrelated titles, so every row scores
+ * zero and gets filtered out — making a full workspace look empty.
+ */
+function wantsCounts(text: string): boolean {
+  return /how many|how much|number of|count|total|list all|show all|كم|كام|عدد|مجموع|كل المهام|كل الملاحظات|في عندي/i.test(
+    text,
+  );
+}
+
+/**
+ * Authoritative counts and a compact listing of what actually exists.
+ *
+ * Always injected for count-style questions, and cheap enough to include
+ * whenever the user asks about their workspace. This is what stops the model
+ * from answering "0 tasks" when three tasks exist — it never has to infer a
+ * number from keyword matches.
+ */
+async function buildWorkspaceSummary(userId: string, granted?: Set<string>) {
+  const scope = new UserScope(userId);
+  const can = (area: string) => !granted || granted.has(`${area}:read`);
+
+  const OPEN_TASK_STATUSES = ["todo", "in_progress", "blocked"] as const;
+
+  const [taskRows, doneRows, noteRows, projectRows, goalRows, captureRows, eventRows] = await Promise.all([
+    can("tasks")
+      ? db
+          .select({ id: tasks.id, title: tasks.title, status: tasks.status, priority: tasks.priority, dueAt: tasks.dueAt })
+          .from(tasks)
+          .where(and(scope.where(tasks), inArray(tasks.status, [...OPEN_TASK_STATUSES])))
+          .orderBy(asc(tasks.priority))
+          .limit(100)
+      : Promise.resolve([]),
+    can("tasks")
+      ? db
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(and(scope.where(tasks), eq(tasks.status, "done")))
+          .limit(500)
+      : Promise.resolve([]),
+    can("notes")
+      ? db
+          .select({ id: notes.id, title: notes.title })
+          .from(notes)
+          .where(and(scope.where(notes), isNull(notes.deletedAt)))
+          .orderBy(desc(notes.updatedAt))
+          .limit(100)
+      : Promise.resolve([]),
+    can("projects")
+      ? db
+          .select({ id: projects.id, name: projects.name, status: projects.status })
+          .from(projects)
+          .where(and(scope.where(projects), inArray(projects.status, ["active", "on_hold"])))
+          .orderBy(desc(projects.updatedAt))
+          .limit(100)
+      : Promise.resolve([]),
+    can("goals")
+      ? db
+          .select({ id: goals.id, title: goals.title, status: goals.status })
+          .from(goals)
+          .where(and(scope.where(goals), eq(goals.status, "active")))
+          .orderBy(desc(goals.updatedAt))
+          .limit(100)
+      : Promise.resolve([]),
+    can("inbox")
+      ? db
+          .select({ id: captures.id })
+          .from(captures)
+          .where(and(scope.where(captures), eq(captures.processed, false)))
+          .limit(500)
+      : Promise.resolve([]),
+    can("calendar")
+      ? db
+          .select({ id: events.id, title: events.title, startAt: events.startAt })
+          .from(events)
+          .where(and(scope.where(events), gte(events.endAt, new Date())))
+          .orderBy(asc(events.startAt))
+          .limit(50)
+      : Promise.resolve([]),
+  ]);
+
+  // Omitted areas must not read as "0" — that would be a wrong answer rather
+  // than an unavailable one, so each line says which case it is.
+  const notGranted = can("tasks") ? "" : " (not shared with the assistant)";
+  const lines: string[] = ["Authoritative workspace counts — quote these numbers directly:"];
+
+  if (can("tasks")) {
+    lines.push(
+      `- Tasks: ${taskRows.length} open, ${doneRows.length} completed, ${taskRows.length + doneRows.length} total`,
+      ...(taskRows.length
+        ? taskRows.map(
+            (t) =>
+              `    • ${t.title} [${t.status}, ${t.priority}]${t.dueAt ? ` due ${t.dueAt.toISOString()}` : ""}`,
+          )
+        : ["    • (no open tasks)"]),
+    );
+  } else {
+    lines.push(`- Tasks: unavailable${notGranted}`);
+  }
+
+  if (can("notes")) {
+    lines.push(
+      `- Notes: ${noteRows.length}`,
+      ...(noteRows.length ? noteRows.slice(0, 30).map((n) => `    • ${n.title || "Untitled note"}`) : ["    • (none)"]),
+    );
+  } else {
+    lines.push(`- Notes: unavailable${notGranted}`);
+  }
+
+  if (can("projects")) {
+    lines.push(
+      `- Projects: ${projectRows.length} active`,
+      ...(projectRows.length
+        ? projectRows.map((p) => `    • ${p.name} [${p.status}]`)
+        : ["    • (no active projects)"]),
+    );
+  } else {
+    lines.push(`- Projects: unavailable${notGranted}`);
+  }
+
+  if (can("goals")) lines.push(`- Goals: ${goalRows.length} active`);
+  if (can("inbox")) lines.push(`- Inbox items awaiting triage: ${captureRows.length}`);
+  if (can("calendar")) {
+    lines.push(
+      `- Upcoming events: ${eventRows.length}`,
+      ...(eventRows.length
+        ? eventRows.slice(0, 15).map((e) => `    • ${e.title} · ${e.startAt.toISOString()}`)
+        : ["    • (none upcoming)"]),
+    );
+  }
+
+  return lines.join("\n");
+}
+
 export async function askAssistantAction(
   input: unknown,
 ): Promise<AiResult<{ threadId: string; answer: string; citations: Citation[]; grounded: boolean }>> {
@@ -1002,7 +1143,7 @@ export async function askAssistantAction(
   const contextBlock =
     chunks.length > 0
       ? chunks.map((c) => fenceUntrusted(c.label, c.text)).join("\n\n")
-      : "(the workspace has no content matching this question)";
+      : "(keyword search found no matching excerpts — this does NOT mean the workspace is empty; check the counts above)";
 
   const piiNote =
     detectPiiCategories(message + contextBlock).length > 0
@@ -1011,6 +1152,13 @@ export async function askAssistantAction(
 
   const timeBound = wantsAgenda(message);
   const agendaBlock = timeBound ? await buildAgenda(user.id, grants) : "";
+
+  // Always give the model real counts. Keyword retrieval alone cannot answer
+  // "how many tasks do I have": the user types a category word while the rows
+  // carry unrelated titles, so every row scores zero and is dropped — which
+  // reads to the model as an empty workspace.
+  const countQuestion = wantsCounts(message);
+  const summaryBlock = await buildWorkspaceSummary(user.id, grants);
 
   // Only advertise the write tools the user has actually authorised, so the
   // model cannot even propose an action it is not allowed to perform.
@@ -1037,6 +1185,10 @@ export async function askAssistantAction(
     mode === "chat" ? "For anything else, answer from your own knowledge — do not refuse just because the workspace is empty." : "",
     "Never reference sources that are not listed below.",
     piiNote,
+    `\n${summaryBlock}`,
+    countQuestion
+      ? "The user is asking for a count or a total. Answer with the exact number from the block above, then optionally list the items. Do not say the workspace is empty."
+      : "For any question about how many items exist, or what is in a section, use the counts above — they are exact. Never say a section is empty when a non-zero count appears there.",
     agendaBlock ? `\nLive agenda snapshot (authoritative — prefer this over guessing dates):\n${agendaBlock}` : "",
     "",
     `User: ${message}`,

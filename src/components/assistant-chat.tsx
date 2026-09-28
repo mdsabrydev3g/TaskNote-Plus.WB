@@ -205,7 +205,14 @@ export function AssistantChat({
                       ))}
                     </div>
                   </div>
-                ) : message.role === "assistant" && aiAvailable ? (
+                ) : message.role === "assistant" &&
+                  aiAvailable &&
+                  // Only note the absence of sources when the answer itself is
+                  // empty. A count or list answer is derived from the live
+                  // workspace totals, not from titled excerpts, so it has no
+                  // citations yet is completely correct — saying "no matching
+                  // source" there contradicts the answer above it.
+                  message.content.trim().length === 0 ? (
                   <p className="mt-2.5 text-[10px] text-ink-faint">
                     {t(
                       "لم أجد مصدراً مطابقاً في مساحتك لهذا السؤال.",

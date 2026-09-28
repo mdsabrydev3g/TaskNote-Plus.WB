@@ -72,6 +72,16 @@ export function supportsTools(provider: ProviderId): boolean {
   return provider === "groq" || provider === "openrouter";
 }
 
+/**
+ * True when ANY configured provider can call tools. Tool use is a capability of
+ * the gateway, not of whichever provider happens to answer first: if Groq is
+ * rate-limited and we fail over to Google mid-conversation, we still want the
+ * loop to have been entered so a later round can execute a tool call.
+ */
+export function anyProviderSupportsTools(): boolean {
+  return configuredProviders().some((p) => supportsTools(p.id));
+}
+
 type ProviderConfig = {
   id: ProviderId;
   label: string;
@@ -81,7 +91,7 @@ type ProviderConfig = {
 
 /** All configured providers, in priority order. */
 function configuredProviders(): ProviderConfig[] {
-  const forced = process.env.AI_PROVIDER?.trim() as ProviderId | "" | undefined;
+  const preferred = process.env.AI_PROVIDER?.trim() as ProviderId | "" | undefined;
   const all: ProviderConfig[] = [
     {
       id: "groq",
@@ -112,11 +122,18 @@ function configuredProviders(): ProviderConfig[] {
     },
   ];
 
-  if (forced) {
-    const only = all.find((c) => c.id === forced && c.configured);
-    return only ? [only] : [];
+  const available = all.filter((c) => c.configured);
+  if (available.length === 0) return [];
+
+  // AI_PROVIDER expresses a PREFERENCE, not an exclusive choice: the named
+  // provider is tried first, then the rest still act as fallbacks. Treating it
+  // as exclusive would silently disable the free-model failover the user relies
+  // on when a provider goes down.
+  if (preferred) {
+    const first = available.find((c) => c.id === preferred);
+    if (first) return [first, ...available.filter((c) => c.id !== preferred)];
   }
-  return all.filter((c) => c.configured);
+  return available;
 }
 
 export function resolveProvider(): ProviderConfig | null {

@@ -141,20 +141,20 @@ export function AssistantChat({
               <Sparkles className="h-5 w-5" aria-hidden />
             </div>
             <p className="mt-4 text-sm font-medium text-ink">
-              {t("اسأل عن أي شيء في مساحتك", "Ask anything about your workspace")}
+              {t("اسأل عن أي شيء — أو اطلب مني أن أنفّذ", "Ask me anything — or tell me to do something")}
             </p>
             <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-ink-muted">
               {t(
-                "أجيب فقط من محتواك: ملاحظاتك، مهامك، مشاريعك وأهدافك. وإذا لم أجد الإجابة، سأقول ذلك بصراحة.",
-                "I answer only from your content: your notes, tasks, projects and goals. If I can't find an answer, I'll say so plainly.",
+                "أجيب على أي سؤال من معرفتي العامة، وأبحث في ما سمحت لي بقراءته. ويمكنني أن أنشئ مهامك ومواعيدك ومشاريعك وأهدافك وملاحظاتك — حسب الصلاحيات التي منحتها لي.",
+                "I answer any question from my own knowledge, and search whatever you have allowed me to read. I can also create your tasks, events, projects, goals and notes — within the permissions you grant.",
               )}
             </p>
 
             <div className="mt-6 flex flex-wrap justify-center gap-2">
               {[
+                { ar: "اعملي اجتماع بكرة الساعة 10", en: "Book me a meeting tomorrow at 10" },
                 { ar: "ما الذي يجب أن أركّز عليه اليوم؟", en: "What should I focus on today?" },
-                { ar: "لخّص لي ملاحظات هذا الأسبوع", en: "Summarise this week's notes" },
-                { ar: "ما المشاريع المتأخرة؟", en: "Which projects are falling behind?" },
+                { ar: "حل لي هذه المسألة: 17 × 23 + 45", en: "Solve this: 17 × 23 + 45" },
               ].map((suggestion) => (
                 <button
                   key={suggestion.en}

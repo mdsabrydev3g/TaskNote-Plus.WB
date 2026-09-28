@@ -51,12 +51,18 @@ const MOBILE_NAV = NAV.filter((n) =>
 );
 
 function CountBadge({ value, active }: { value: number; active: boolean }) {
-  if (value <= 0) return null;
+  // A zero still renders, muted: an empty section should read as "0 items",
+  // not as a missing feature. The active row always gets emphasis.
+  const empty = value <= 0;
   return (
     <span
       className={cn(
         "rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums",
-        active ? "bg-brand-600 text-white" : "bg-slate-100 text-ink-muted",
+        active
+          ? "bg-brand-600 text-white"
+          : empty
+            ? "bg-slate-100 text-ink-faint"
+            : "bg-slate-100 text-ink-muted",
       )}
       aria-label={`${value}`}
     >

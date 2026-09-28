@@ -19,7 +19,7 @@ import {
 } from "@/db/schema";
 import { UserScope, assertOwnership } from "@/lib/db/scope";
 import { requireUser } from "@/lib/session";
-import { generate, aiStatus, parseJsonLoose, resolveProvider, supportsTools, type ChatMessage } from "@/lib/ai/gateway";
+import { generate, aiStatus, parseJsonLoose, anyProviderSupportsTools, type ChatMessage } from "@/lib/ai/gateway";
 import { TOOL_DEFINITIONS, runTool } from "@/lib/ai/tools";
 import { ALL_SCOPES, SOURCE_SCOPE, TOOL_SCOPE } from "@/lib/ai/scopes";
 import {
@@ -1017,8 +1017,7 @@ export async function askAssistantAction(
   const allowedTools = TOOL_DEFINITIONS.filter((t) => grants.has(TOOL_SCOPE[t.name] ?? ""));
 
   const toolsEnabled =
-    ASSISTANT_TOOLS_ENABLED && allowedTools.length > 0 &&
-    supportsTools(resolveProvider()?.id ?? "ollama");
+    ASSISTANT_TOOLS_ENABLED && allowedTools.length > 0 && anyProviderSupportsTools();
 
   const toolSpecs = allowedTools.map((t) => ({
     type: "function" as const,

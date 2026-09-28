@@ -115,7 +115,9 @@ function configuredProviders(): ProviderConfig[] {
     {
       id: "openrouter",
       label: "OpenRouter",
-      model: process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free",
+      // Verified against a live free-tier key. The previous default
+      // (meta-llama/llama-3.3-70b-instruct:free) is retired and 404s.
+      model: process.env.OPENROUTER_MODEL || "liquid/lfm-2.5-2.6b:free",
       configured: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
     },
     {
@@ -197,12 +199,21 @@ const FALLBACK_MODELS: Record<ProviderId, string[]> = {
     "gemini-3.5-flash",
     "gemini-2.5-flash-lite",
   ],
+  // OpenRouter's free tier churns hard: every model previously listed here was
+  // retired (404) by the time the key was added, and the popular ones return 429
+  // constantly because the free pool is heavily contested. This list was built
+  // from live probes against a real key — keep verified-working non-reasoning
+  // models first, and note that several ":free" models answer with a null
+  // content field, which the empty-response guard in generate() then skips.
   openrouter: [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "deepseek/deepseek-chat-v3.1:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "dots-studio/dots-3-note-preview:free",
+    "qwen/qwen3.8-27b:free",
+    "google/gemma-4-31b-it:free",
+    "cohere/north-mini-code:free",
   ],
   ollama: [],
 };

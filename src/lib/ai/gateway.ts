@@ -170,14 +170,19 @@ export function aiStatus() {
  * run at no cost, so we never fall back onto a paid model.
  */
 const FALLBACK_MODELS: Record<ProviderId, string[]> = {
+  // Ordered fastest/cheapest first. The gpt-oss models are REASONING models:
+  // they spend the token budget on hidden `reasoning` content, so with a small
+  // max_tokens they return an empty `content` and finish_reason "length". They
+  // are kept last so a normal model answers first, and the empty-response guard
+  // in generate() advances past them if the budget is tight.
   groq: [
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
     "qwen/qwen3.8-27b",
     "gemma2-9b-it",
     "allam-2-7b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
   ],
   google: ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"],
   openrouter: [
@@ -256,27 +261,42 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
       try {
         const withSignal: GenerateOptions = { ...options, signal };
+        let outcome: GenerateResult | null = null;
         switch (provider.id) {
           case "groq":
-            return await callOpenAICompatible(
+            outcome = await callOpenAICompatible(
               "https://api.groq.com/openai/v1/chat/completions",
               process.env.GROQ_API_KEY!,
               attempt,
               withSignal,
               started,
             );
+            break;
           case "openrouter":
-            return await callOpenAICompatible(
+            outcome = await callOpenAICompatible(
               "https://openrouter.ai/api/v1/chat/completions",
               process.env.OPENROUTER_API_KEY!,
               attempt,
               withSignal,
               started,
             );
+            break;
           case "google":
-            return await callGoogle(attempt, withSignal, started);
+            outcome = await callGoogle(attempt, withSignal, started);
+            break;
           case "ollama":
-            return await callOllama(attempt, withSignal, started);
+            outcome = await callOllama(attempt, withSignal, started);
+            break;
+        }
+
+        // An HTTP 200 that carries neither prose nor a tool call is a silent
+        // failure, not an answer — some free models do this when they hit an
+        // internal guard. Returning it would strand the user on an empty reply,
+        // so keep walking the chain instead.
+        if (outcome && outcome.available) {
+          if (outcome.text.length > 0 || outcome.toolCalls.length > 0) return outcome;
+          lastError = `${provider.label} ${model}: empty response`;
+          continue;
         }
       } catch (error) {
         lastError = error instanceof Error ? error.message : "Unknown AI error";

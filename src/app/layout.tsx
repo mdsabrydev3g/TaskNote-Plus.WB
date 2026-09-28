@@ -22,7 +22,7 @@ export const metadata: Metadata = {
   formatDetection: { telephone: false },
   icons: {
     icon: [
-      { url: "/icons/icon.svg", type: "image/svg+xml" },
+      { url: "/icons/favicon-32.png", sizes: "32x32", type: "image/png" },
       { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
       { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
     ],
@@ -51,6 +51,16 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang={locale} dir={dir} suppressHydrationWarning>
       <head>
+        {/* Apply the stored theme before first paint so dark mode never flashes
+            white. Mirrors ThemeProvider's resolution order: server value, then
+            the local override, then the OS preference. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var k="tnp-theme";var s=localStorage.getItem(k)||${JSON.stringify(
+              (user?.theme as string) ?? "system",
+            )};var d=s==="dark"||(s==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);var r=document.documentElement;r.classList.toggle("dark",d);r.dataset.theme=d?"dark":"light";}catch(e){}})();`,
+          }}
+        />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
@@ -58,7 +68,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-dvh bg-slate-50">
+      <body className="min-h-dvh bg-app">
         <ThemeProvider initialTheme={(user?.theme as "light" | "dark" | "system") ?? "system"}>
           <ToastProvider>
             {children}

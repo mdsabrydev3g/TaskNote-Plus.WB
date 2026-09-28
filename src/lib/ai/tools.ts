@@ -19,12 +19,23 @@
  *     we never let the model invent an epoch timestamp.
  */
 
-import { createEventAction, createNoteAction, createTaskAction } from "@/app/actions/content";
+import {
+  createEventAction,
+  createGoalAction,
+  createNoteAction,
+  createProjectAction,
+  createTaskAction,
+} from "@/app/actions/content";
 import { db } from "@/db";
 import { aiActionLogs } from "@/db/schema";
 import { AI_REVERSIBLE_HOURS } from "@/lib/config";
 
-export type ToolName = "create_event" | "create_task" | "create_note";
+export type ToolName =
+  | "create_event"
+  | "create_task"
+  | "create_note"
+  | "create_project"
+  | "create_goal";
 
 export type ToolDefinition = {
   name: ToolName;
@@ -32,12 +43,69 @@ export type ToolDefinition = {
   parameters: Record<string, unknown>;
 };
 
-/** JSON-schema definitions advertised to the model. */
+/**
+ * JSON-schema definitions advertised to the model.
+ *
+ * Each description leads with the user's own vocabulary for that destination
+ * and names the `/route` it lands on. The model previously sent "create a
+ * project called X" to `create_note` because only notes/tasks/events existed
+ * and `create_note` was the nearest thing — so the fix is both more tools and
+ * unambiguous descriptions.
+ */
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    name: "create_project",
+    description:
+      "Create a PROJECT (a container that groups tasks, notes and goals) — saved under /projects. Use when the user says project, مشروع, initiative, campaign, client work, 'a project called X'. Do NOT use create_note for a project.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The project name, e.g. 'Project Phoenix'." },
+        description: { type: "string", description: "Optional description of the project's scope." },
+        status: { type: "string", enum: ["active", "on_hold", "completed", "archived"] },
+        target_date: { type: "string", description: "Optional target date YYYY-MM-DD." },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "create_goal",
+    description:
+      "Create a GOAL or habit with a measurable target — saved under /goals. Use when the user says goal, هدف, target, habit, عادة, 'I want to reach X', 'track how many X'. Do NOT use create_task for a measurable ongoing goal.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The goal, e.g. 'Read 24 books'." },
+        description: { type: "string", description: "Optional detail or motivation." },
+        kind: { type: "string", enum: ["goal", "habit"], description: "habit for recurring routines." },
+        metric_type: { type: "string", enum: ["percent", "count", "minutes", "currency"] },
+        target_value: { type: "number", description: "The number to reach, e.g. 24." },
+        unit: { type: "string", description: "Optional unit, e.g. 'books', 'kg'." },
+        due_date: { type: "string", description: "Optional deadline YYYY-MM-DD." },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "create_task",
+    description:
+      "Create a to-do TASK — a single concrete action, saved under /tasks. Use when the user says task, مهمة, todo, remind me to, 'I need to X', 'add X to my list'. If it is a scheduled meeting use create_event; if it is a multi-step effort use create_project.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short imperative task title." },
+        due_date: { type: "string", description: "Optional due date YYYY-MM-DD." },
+        due_time: { type: "string", description: "Optional due time HH:MM (only if the user gave one)." },
+        priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+        description: { type: "string", description: "Optional detail." },
+      },
+      required: ["title"],
+    },
+  },
   {
     name: "create_event",
     description:
-      "Create a calendar event or meeting. Use whenever the user asks to schedule, book, plan or block time (e.g. 'book a meeting tomorrow at 10').",
+      "Create a calendar EVENT or meeting at a specific date and time — saved under /calendar. Use whenever the user asks to schedule, book, plan or block time (e.g. 'book a meeting tomorrow at 10', 'اجتماع بكرة الساعة 10'). Always use this for anything with a clock time.",
     parameters: {
       type: "object",
       properties: {
@@ -60,25 +128,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
   {
-    name: "create_task",
-    description:
-      "Create a to-do task. Use when the user asks to add, remind or track something actionable that is not a scheduled meeting.",
-    parameters: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Short imperative task title." },
-        due_date: { type: "string", description: "Optional due date YYYY-MM-DD." },
-        due_time: { type: "string", description: "Optional due time HH:MM (only if the user gave one)." },
-        priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
-        description: { type: "string", description: "Optional detail." },
-      },
-      required: ["title"],
-    },
-  },
-  {
     name: "create_note",
     description:
-      "Save a note. Use when the user asks to write down, record or remember free-form information that is not a task or an event.",
+      "Save a free-form NOTE — reference text with no deadline and no measurable target, saved under /notes. Use for 'write down', 'note that', 'remember this', 'ملاحظة', meeting minutes, ideas, reference material. NOT for tasks, meetings, projects or goals.",
     parameters: {
       type: "object",
       properties: {
@@ -173,6 +225,8 @@ export async function runTool(
   if (name === "create_event") return runCreateEvent(rawArgs, ctx);
   if (name === "create_task") return runCreateTask(rawArgs, ctx);
   if (name === "create_note") return runCreateNote(rawArgs, ctx);
+  if (name === "create_project") return runCreateProject(rawArgs, ctx);
+  if (name === "create_goal") return runCreateGoal(rawArgs, ctx);
 
   return {
     name: "create_note",
@@ -341,5 +395,90 @@ async function runCreateNote(rawArgs: Record<string, unknown>, ctx: ToolContext)
     createdLabel: title,
     summary: `Saved note “${title}”`,
     forModel: `create_note succeeded. Note "${title}" saved (id ${id}). Confirm briefly.`,
+  };
+}
+
+async function runCreateProject(rawArgs: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+  const name: ToolName = "create_project";
+  const projectName = str(rawArgs.name) ?? str(rawArgs.title);
+  if (!projectName) return fail(name, "create_project failed: `name` is required.");
+
+  const statusInput = str(rawArgs.status);
+  const status =
+    statusInput && ["active", "on_hold", "completed", "archived"].includes(statusInput)
+      ? statusInput
+      : "active";
+
+  const targetDate = str(rawArgs.target_date);
+  const targetAt = targetDate ? zonedDateTime(targetDate, "12:00", ctx.timezone) : null;
+
+  const result = await createProjectAction({
+    name: projectName,
+    description: str(rawArgs.description) ?? null,
+    status,
+    targetDate: targetAt,
+  });
+
+  if (!result.ok) {
+    return fail(name, `create_project was rejected: ${result.error ?? "validation error"}`);
+  }
+
+  const id = (result.data as { id: string }).id;
+  await logWrite(ctx, "create_project", id);
+
+  return {
+    name,
+    ok: true,
+    createdId: id,
+    createdLabel: projectName,
+    summary: `Created project “${projectName}” in Projects`,
+    forModel: `create_project succeeded. Project "${projectName}" created and is visible under /projects (id ${id}). Confirm briefly and mention it landed in Projects.`,
+  };
+}
+
+async function runCreateGoal(rawArgs: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+  const name: ToolName = "create_goal";
+  const title = str(rawArgs.title);
+  if (!title) return fail(name, "create_goal failed: `title` is required.");
+
+  const kindInput = str(rawArgs.kind);
+  const kind = kindInput === "habit" ? "habit" : "goal";
+
+  const metricInput = str(rawArgs.metric_type);
+  const metricType =
+    metricInput && ["percent", "count", "minutes", "currency"].includes(metricInput)
+      ? metricInput
+      : "count";
+
+  const target = num(rawArgs.target_value);
+  const dueDate = str(rawArgs.due_date);
+  const dueAt = dueDate ? zonedDateTime(dueDate, "12:00", ctx.timezone) : null;
+
+  const result = await createGoalAction({
+    title,
+    description: str(rawArgs.description) ?? null,
+    kind,
+    metricType,
+    targetValue: target !== undefined && target >= 0 ? target : 100,
+    currentValue: 0,
+    unit: str(rawArgs.unit) ?? null,
+    dueDate: dueAt,
+    status: "active",
+  });
+
+  if (!result.ok) {
+    return fail(name, `create_goal was rejected: ${result.error ?? "validation error"}`);
+  }
+
+  const id = (result.data as { id: string }).id;
+  await logWrite(ctx, "create_goal", id);
+
+  return {
+    name,
+    ok: true,
+    createdId: id,
+    createdLabel: title,
+    summary: `Created ${kind === "habit" ? "habit" : "goal"} “${title}” in Goals`,
+    forModel: `create_goal succeeded. ${kind === "habit" ? "Habit" : "Goal"} "${title}" created and is visible under /goals (id ${id}). Confirm briefly and mention it landed in Goals.`,
   };
 }

@@ -79,10 +79,10 @@ type ProviderConfig = {
   configured: boolean;
 };
 
-export function resolveProvider(): ProviderConfig | null {
+/** All configured providers, in priority order. */
+function configuredProviders(): ProviderConfig[] {
   const forced = process.env.AI_PROVIDER?.trim() as ProviderId | "" | undefined;
-
-  const candidates: ProviderConfig[] = [
+  const all: ProviderConfig[] = [
     {
       id: "groq",
       label: "Groq",
@@ -113,49 +113,96 @@ export function resolveProvider(): ProviderConfig | null {
   ];
 
   if (forced) {
-    return candidates.find((c) => c.id === forced && c.configured) ?? null;
+    const only = all.find((c) => c.id === forced && c.configured);
+    return only ? [only] : [];
   }
-  return candidates.find((c) => c.configured) ?? null;
+  return all.filter((c) => c.configured);
+}
+
+export function resolveProvider(): ProviderConfig | null {
+  return configuredProviders()[0] ?? null;
 }
 
 export function aiStatus() {
-  const provider = resolveProvider();
+  const providers = configuredProviders();
+  const provider = providers[0] ?? null;
+
+  // The full ordered chain the assistant will walk before giving up — all free
+  // models, so the user can see there is redundancy if one goes down.
+  const chain = providers.flatMap((p) =>
+    [p.model, ...FALLBACK_MODELS[p.id]].filter((m, i, all) => m && all.indexOf(m) === i),
+  );
+
   return {
     available: Boolean(provider),
     provider: provider?.id ?? ("none" as const),
     model: provider?.model ?? "",
     label: provider?.label ?? "Not configured",
+    /** Every provider that has credentials, in priority order. */
+    providers: providers.map((p) => ({ id: p.id, label: p.label, model: p.model })),
+    /** Every model that will be attempted, in order. */
+    chain,
+    providerCount: providers.length,
   };
 }
 
 /**
  * Fallback chat models per provider. Groq in particular retires model names
  * with little notice, and a key may lack access to the configured default.
- * If the primary model answers with `model_not_found` we retry down this list
- * rather than failing the user's request outright.
+ * Every entry here must be usable on a FREE tier — the assistant is meant to
+ * run at no cost, so we never fall back onto a paid model.
  */
 const FALLBACK_MODELS: Record<ProviderId, string[]> = {
-  groq: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "allam-2-7b"],
-  google: ["gemini-2.0-flash", "gemini-1.5-flash"],
+  groq: [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "qwen/qwen3.8-27b",
+    "gemma2-9b-it",
+    "allam-2-7b",
+  ],
+  google: ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"],
   openrouter: [
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-2-9b-it:free",
     "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "deepseek/deepseek-chat-v3.1:free",
   ],
   ollama: [],
 };
 
-/** True when a provider error means "this model name is not usable here". */
+/** True when the error means "this specific model is unusable here". */
 function isModelUnavailable(message: string): boolean {
-  return /model_not_found|does not exist|not have access|not found|404/i.test(message);
+  return /model_not_found|does not exist|not have access|not found|404|decommissioned|deprecated|no longer supported/i.test(
+    message,
+  );
 }
+
+/**
+ * True when retrying the SAME provider on a DIFFERENT model is worth it:
+ * rate limits, timeouts and capacity errors are often per-model on free tiers,
+ * so another model on the same key can still succeed.
+ */
+function isRetriable(message: string): boolean {
+  return (
+    isModelUnavailable(message) ||
+    /\b429\b|rate.?limit|too many requests|quota|overloaded|capacity|timeout|timed out|aborted|503|502|500|unavailable/i.test(
+      message,
+    )
+  );
+}
+
+/** Wall-clock ceiling for one provider call, so a hung model cannot stall the UI. */
+const REQUEST_TIMEOUT_MS = 25_000;
 
 /** Provider-agnostic entry point. Never throws — failures come back in-band. */
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
-  const provider = resolveProvider();
+  const providers = configuredProviders();
   const started = Date.now();
 
-  if (!provider) {
+  if (providers.length === 0) {
     return {
       available: false,
       text: "",
@@ -169,51 +216,68 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     };
   }
 
-  // Try the configured model first, then the fallbacks (deduplicated).
-  const attempts = [provider.model, ...FALLBACK_MODELS[provider.id]].filter(
-    (m, i, all) => m && all.indexOf(m) === i,
-  );
-
   let lastError = "Unknown AI error";
+  let lastProvider = providers[0];
 
-  for (const model of attempts) {
-    const attempt: ProviderConfig = { ...provider, model };
-    try {
-      switch (provider.id) {
-        case "groq":
-          return await callOpenAICompatible(
-            "https://api.groq.com/openai/v1/chat/completions",
-            process.env.GROQ_API_KEY!,
-            attempt,
-            options,
-            started,
-          );
-        case "openrouter":
-          return await callOpenAICompatible(
-            "https://openrouter.ai/api/v1/chat/completions",
-            process.env.OPENROUTER_API_KEY!,
-            attempt,
-            options,
-            started,
-          );
-        case "google":
-          return await callGoogle(attempt, options, started);
-        case "ollama":
-          return await callOllama(attempt, options, started);
+  // Walk every provider, and within each provider every free model, until one
+  // answers. This is what makes the assistant survive a dead, rate-limited or
+  // hung model without the user noticing.
+  for (const provider of providers) {
+    lastProvider = provider;
+
+    const attempts = [provider.model, ...FALLBACK_MODELS[provider.id]].filter(
+      (m, i, all) => m && all.indexOf(m) === i,
+    );
+
+    for (const model of attempts) {
+      const attempt: ProviderConfig = { ...provider, model };
+
+      // Per-request timeout so a hung model cannot stall the whole reply.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const signal = options.signal ?? controller.signal;
+
+      try {
+        const withSignal: GenerateOptions = { ...options, signal };
+        switch (provider.id) {
+          case "groq":
+            return await callOpenAICompatible(
+              "https://api.groq.com/openai/v1/chat/completions",
+              process.env.GROQ_API_KEY!,
+              attempt,
+              withSignal,
+              started,
+            );
+          case "openrouter":
+            return await callOpenAICompatible(
+              "https://openrouter.ai/api/v1/chat/completions",
+              process.env.OPENROUTER_API_KEY!,
+              attempt,
+              withSignal,
+              started,
+            );
+          case "google":
+            return await callGoogle(attempt, withSignal, started);
+          case "ollama":
+            return await callOllama(attempt, withSignal, started);
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : "Unknown AI error";
+        // A rate limit, timeout or missing model is worth trying elsewhere.
+        // An auth failure would fail identically, so stop this provider and
+        // let the next configured provider be tried.
+        if (!isRetriable(lastError)) break;
+      } finally {
+        clearTimeout(timer);
       }
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : "Unknown AI error";
-      // Only a model-access problem is worth retrying with another model.
-      // Auth/rate-limit/network failures would fail identically on every model.
-      if (!isModelUnavailable(lastError)) break;
     }
   }
 
   return {
     available: false,
     text: "",
-    provider: provider.id,
-    model: provider.model,
+    provider: lastProvider.id,
+    model: lastProvider.model,
     tokensIn: 0,
     tokensOut: 0,
     latencyMs: Date.now() - started,

@@ -29,6 +29,15 @@ export function ThemeProvider({
     if (stored) setThemeState(stored);
   }, []);
 
+  // Keep multiple tabs of the app in agreement.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY && e.newValue) setThemeState(e.newValue as Theme);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     setSystemDark(media.matches);

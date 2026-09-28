@@ -1,6 +1,6 @@
 "use server";
 
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import {
@@ -21,6 +21,7 @@ import { UserScope, assertOwnership } from "@/lib/db/scope";
 import { requireUser } from "@/lib/session";
 import { generate, aiStatus, parseJsonLoose, resolveProvider, supportsTools, type ChatMessage } from "@/lib/ai/gateway";
 import { TOOL_DEFINITIONS, runTool } from "@/lib/ai/tools";
+import { ALL_SCOPES, SOURCE_SCOPE, TOOL_SCOPE } from "@/lib/ai/scopes";
 import {
   DATA_BOUNDARY_INSTRUCTION,
   GENERAL_ASSISTANT_INSTRUCTION,
@@ -55,6 +56,17 @@ const SYSTEM_PROMPT = [
   "You help with planning, summarising, extracting action items, and answering questions about the user's own notes, tasks, projects and goals.",
   "",
   ASSISTANT_MODE === "general" ? GENERAL_ASSISTANT_INSTRUCTION : DATA_BOUNDARY_INSTRUCTION,
+  "",
+  "When the user asks you to create or add something, you MUST call the tool whose destination matches what they named. Never substitute a different kind of item.",
+  "",
+  "Routing rules — pick the destination from the user's own wording:",
+  "- They say project / مشروع / initiative / campaign / client → create_project (lands in /projects).",
+  "- They say goal / هدف / target / habit / عادة / a measurable number to reach → create_goal (lands in /goals).",
+  "- They say meeting / appointment / الاجتماع / موعد / a clock time → create_event (lands in /calendar).",
+  "- They say task / todo / مهمة / remind me / 'I need to' → create_task (lands in /tasks).",
+  "- They say note / ملاحظة / 'write down' / 'save this info' / reference text → create_note (lands in /notes).",
+  "If two destinations seem plausible, prefer the more specific one (project or goal over note) and say which you chose.",
+  "After a tool succeeds, tell the user the item's name and which section it now lives in.",
   "",
   "Style: concise, specific, no filler. Match the user's language (Arabic or English).",
   "Arabic responses should read as natural Modern Standard Arabic unless the user writes in a dialect, in which case mirror their tone.",
@@ -626,7 +638,7 @@ export async function generateBriefAction(
  * accessible content. It is structured so a pgvector semantic pass can be
  * fused in later (RRF, §8.10) without changing this contract.
  */
-async function retrieveContext(userId: string, query: string, limit = 8) {
+async function retrieveContext(userId: string, query: string, limit = 8, granted?: Set<string>) {
   const scope = new UserScope(userId);
   const terms = query
     .toLowerCase()
@@ -636,71 +648,88 @@ async function retrieveContext(userId: string, query: string, limit = 8) {
 
   if (terms.length === 0) return [];
 
+  // Reading is opt-in per area: a source contributes nothing unless the user
+  // has granted `<area>:read`. With no set passed (legacy callers) everything
+  // is allowed, matching the pre-permissions behaviour.
+  const canRead = (sourceKey: string) => !granted || granted.has(SOURCE_SCOPE[sourceKey]);
+
   const [noteRows, taskRows, eventRows, captureRows, projectRows, goalRows] = await Promise.all([
-    db
-      .select({ id: notes.id, title: notes.title, text: notes.contentText })
-      .from(notes)
-      .where(and(scope.where(notes), eq(notes.aiAccessible, true)))
-      .orderBy(desc(notes.updatedAt))
-      .limit(150),
-    db
-      .select({
-        id: tasks.id,
-        title: tasks.title,
-        description: tasks.description,
-        status: tasks.status,
-        dueAt: tasks.dueAt,
-        priority: tasks.priority,
-      })
-      .from(tasks)
-      .where(and(scope.where(tasks), eq(tasks.aiAccessible, true)))
-      .orderBy(desc(tasks.updatedAt))
-      .limit(150),
-    db
-      .select({
-        id: events.id,
-        title: events.title,
-        description: events.description,
-        location: events.location,
-        startAt: events.startAt,
-        endAt: events.endAt,
-      })
-      .from(events)
-      .where(and(scope.where(events), eq(events.aiAccessible, true)))
-      .orderBy(desc(events.startAt))
-      .limit(150),
+    canRead("note")
+      ? db
+          .select({ id: notes.id, title: notes.title, text: notes.contentText })
+          .from(notes)
+          .where(and(scope.where(notes), eq(notes.aiAccessible, true)))
+          .orderBy(desc(notes.updatedAt))
+          .limit(150)
+      : Promise.resolve([]),
+    canRead("task")
+      ? db
+          .select({
+            id: tasks.id,
+            title: tasks.title,
+            description: tasks.description,
+            status: tasks.status,
+            dueAt: tasks.dueAt,
+            priority: tasks.priority,
+          })
+          .from(tasks)
+          .where(and(scope.where(tasks), eq(tasks.aiAccessible, true)))
+          .orderBy(desc(tasks.updatedAt))
+          .limit(150)
+      : Promise.resolve([]),
+    canRead("event")
+      ? db
+          .select({
+            id: events.id,
+            title: events.title,
+            description: events.description,
+            location: events.location,
+            startAt: events.startAt,
+            endAt: events.endAt,
+          })
+          .from(events)
+          .where(and(scope.where(events), eq(events.aiAccessible, true)))
+          .orderBy(desc(events.startAt))
+          .limit(150)
+      : Promise.resolve([]),
     // The inbox is included so a freshly captured item is answerable before
     // it has been triaged into a note or task.
-    db
-      .select({
-        id: captures.id,
-        raw: captures.raw,
-        processed: captures.processed,
-        createdAt: captures.createdAt,
-        suggestedTitle: captures.suggestedTitle,
-      })
-      .from(captures)
-      .where(scope.where(captures))
-      .orderBy(desc(captures.createdAt))
-      .limit(100),
-    db
-      .select({ id: projects.id, name: projects.name, description: projects.description, status: projects.status })
-      .from(projects)
-      .where(and(scope.where(projects), eq(projects.aiAccessible, true)))
-      .orderBy(desc(projects.updatedAt))
-      .limit(60),
-    db
-      .select({
-        id: goals.id,
-        title: goals.title,
-        description: goals.description,
-        status: goals.status,
-        dueDate: goals.dueDate,
-      })
-      .from(goals)
-      .where(and(scope.where(goals), eq(goals.aiAccessible, true)))
-      .orderBy(desc(goals.updatedAt))
-      .limit(60),
+    canRead("capture")
+      ? db
+          .select({
+            id: captures.id,
+            raw: captures.raw,
+            processed: captures.processed,
+            createdAt: captures.createdAt,
+            suggestedTitle: captures.suggestedTitle,
+          })
+          .from(captures)
+          .where(scope.where(captures))
+          .orderBy(desc(captures.createdAt))
+          .limit(100)
+      : Promise.resolve([]),
+    canRead("project")
+      ? db
+          .select({ id: projects.id, name: projects.name, description: projects.description, status: projects.status })
+          .from(projects)
+          .where(and(scope.where(projects), eq(projects.aiAccessible, true)))
+          .orderBy(desc(projects.updatedAt))
+          .limit(60)
+      : Promise.resolve([]),
+    canRead("goal")
+      ? db
+          .select({
+            id: goals.id,
+            title: goals.title,
+            description: goals.description,
+            status: goals.status,
+            dueDate: goals.dueDate,
+          })
+          .from(goals)
+          .where(and(scope.where(goals), eq(goals.aiAccessible, true)))
+          .orderBy(desc(goals.updatedAt))
+          .limit(60)
+      : Promise.resolve([]),
   ]);
 
   const scored: Array<{ label: string; sourceType: string; sourceId: string; text: string; score: number }> = [];
@@ -785,7 +814,7 @@ async function retrieveContext(userId: string, query: string, limit = 8) {
  * time-bound ("what's on today", "my tasks this week"). Lexical scoring cannot
  * answer these reliably because the user rarely types the task's own words.
  */
-async function buildAgenda(userId: string) {
+async function buildAgenda(userId: string, granted?: Set<string>) {
   const scope = new UserScope(userId);
   const now = new Date();
   const endOfDay = new Date(now);
@@ -794,48 +823,60 @@ async function buildAgenda(userId: string) {
   startOfDay.setHours(0, 0, 0, 0);
   const weekAhead = new Date(now.getTime() + 7 * 86_400_000);
 
+  // The agenda respects the same read grants as full retrieval.
+  const canTasks = !granted || granted.has("tasks:read");
+  const canCalendar = !granted || granted.has("calendar:read");
+
   const [dueToday, overdue, nextEvents, openNow] = await Promise.all([
-    db
-      .select({ title: tasks.title, status: tasks.status, priority: tasks.priority, dueAt: tasks.dueAt })
-      .from(tasks)
-      .where(
-        and(
-          scope.where(tasks),
-          ne(tasks.status, "done"),
-          ne(tasks.status, "cancelled"),
-          isNotNull(tasks.dueAt),
-          lte(tasks.dueAt, endOfDay),
-          gte(tasks.dueAt, startOfDay),
-        ),
-      )
-      .orderBy(asc(tasks.dueAt))
-      .limit(50),
-    db
-      .select({ title: tasks.title, status: tasks.status, dueAt: tasks.dueAt })
-      .from(tasks)
-      .where(
-        and(
-          scope.where(tasks),
-          ne(tasks.status, "done"),
-          ne(tasks.status, "cancelled"),
-          isNotNull(tasks.dueAt),
-          lt(tasks.dueAt, startOfDay),
-        ),
-      )
-      .orderBy(asc(tasks.dueAt))
-      .limit(50),
-    db
-      .select({ title: events.title, startAt: events.startAt, endAt: events.endAt, location: events.location })
-      .from(events)
-      .where(and(scope.where(events), gte(events.startAt, startOfDay), lte(events.startAt, weekAhead)))
-      .orderBy(asc(events.startAt))
-      .limit(50),
-    db
-      .select({ title: tasks.title, status: tasks.status, priority: tasks.priority })
-      .from(tasks)
-      .where(and(scope.where(tasks), inArray(tasks.status, ["todo", "in_progress", "blocked"])))
-      .orderBy(asc(tasks.priority))
-      .limit(50),
+    canTasks
+      ? db
+          .select({ title: tasks.title, status: tasks.status, priority: tasks.priority, dueAt: tasks.dueAt })
+          .from(tasks)
+          .where(
+            and(
+              scope.where(tasks),
+              ne(tasks.status, "done"),
+              ne(tasks.status, "cancelled"),
+              isNotNull(tasks.dueAt),
+              lte(tasks.dueAt, endOfDay),
+              gte(tasks.dueAt, startOfDay),
+            ),
+          )
+          .orderBy(asc(tasks.dueAt))
+          .limit(50)
+      : Promise.resolve([]),
+    canTasks
+      ? db
+          .select({ title: tasks.title, status: tasks.status, dueAt: tasks.dueAt })
+          .from(tasks)
+          .where(
+            and(
+              scope.where(tasks),
+              ne(tasks.status, "done"),
+              ne(tasks.status, "cancelled"),
+              isNotNull(tasks.dueAt),
+              lt(tasks.dueAt, startOfDay),
+            ),
+          )
+          .orderBy(asc(tasks.dueAt))
+          .limit(50)
+      : Promise.resolve([]),
+    canCalendar
+      ? db
+          .select({ title: events.title, startAt: events.startAt, endAt: events.endAt, location: events.location })
+          .from(events)
+          .where(and(scope.where(events), gte(events.startAt, startOfDay), lte(events.startAt, weekAhead)))
+          .orderBy(asc(events.startAt))
+          .limit(50)
+      : Promise.resolve([]),
+    canTasks
+      ? db
+          .select({ title: tasks.title, status: tasks.status, priority: tasks.priority })
+          .from(tasks)
+          .where(and(scope.where(tasks), inArray(tasks.status, ["todo", "in_progress", "blocked"])))
+          .orderBy(asc(tasks.priority))
+          .limit(50)
+      : Promise.resolve([]),
   ]);
 
   const lines: string[] = [
@@ -934,7 +975,12 @@ export async function askAssistantAction(
     return { ok: true, data: { threadId: activeThreadId, answer: fallback, citations: [], grounded: false } };
   }
 
-  const chunks = await retrieveContext(user.id, message);
+  // Reading is opt-in: only the areas the user has explicitly granted are
+  // searched. With nothing granted the assistant still answers from general
+  // knowledge, but it cannot see any personal content.
+  const grants = await grantedScopes(user.id);
+
+  const chunks = await retrieveContext(user.id, message, 8, grants);
   const citations: Citation[] = chunks.map((c) => ({
     sourceType: c.sourceType,
     sourceId: c.sourceId,
@@ -964,10 +1010,20 @@ export async function askAssistantAction(
       : "";
 
   const timeBound = wantsAgenda(message);
-  const agendaBlock = timeBound ? await buildAgenda(user.id) : "";
+  const agendaBlock = timeBound ? await buildAgenda(user.id, grants) : "";
+
+  // Only advertise the write tools the user has actually authorised, so the
+  // model cannot even propose an action it is not allowed to perform.
+  const allowedTools = TOOL_DEFINITIONS.filter((t) => grants.has(TOOL_SCOPE[t.name] ?? ""));
 
   const toolsEnabled =
-    ASSISTANT_TOOLS_ENABLED && supportsTools(resolveProvider()?.id ?? "ollama");
+    ASSISTANT_TOOLS_ENABLED && allowedTools.length > 0 &&
+    supportsTools(resolveProvider()?.id ?? "ollama");
+
+  const toolSpecs = allowedTools.map((t) => ({
+    type: "function" as const,
+    function: { name: t.name, description: t.description, parameters: t.parameters },
+  }));
 
   const taskLine =
     mode === "summarize"
@@ -1005,13 +1061,7 @@ export async function askAssistantAction(
     temperature: 0.35,
     maxTokens: 1400,
     ...(toolsEnabled
-      ? {
-          tools: TOOL_DEFINITIONS.map((t) => ({
-            type: "function" as const,
-            function: { name: t.name, description: t.description, parameters: t.parameters },
-          })),
-          toolChoice: "auto" as const,
-        }
+      ? { tools: toolSpecs, toolChoice: "auto" as const }
       : {}),
   });
 
@@ -1031,6 +1081,19 @@ export async function askAssistantAction(
         args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
       } catch {
         args = {};
+      }
+
+      // Defence in depth: never execute a write the user has not authorised,
+      // even if the model names a tool that was not advertised to it.
+      const requiredScope = TOOL_SCOPE[call.function.name];
+      if (!requiredScope || !grants.has(requiredScope)) {
+        conversation.push({
+          role: "tool",
+          tool_call_id: call.id,
+          name: call.function.name,
+          content: `Not permitted: the user has not granted "${requiredScope ?? "that capability"}". Do not retry this tool. Tell the user they can enable it in Settings → Assistant & permissions.`,
+        });
+        continue;
       }
 
       const outcome = await runTool(call.function.name, args, {
@@ -1055,13 +1118,7 @@ export async function askAssistantAction(
       temperature: 0.35,
       maxTokens: 1400,
       ...(toolsEnabled
-        ? {
-            tools: TOOL_DEFINITIONS.map((t) => ({
-              type: "function" as const,
-              function: { name: t.name, description: t.description, parameters: t.parameters },
-            })),
-            toolChoice: "auto" as const,
-          }
+        ? { tools: toolSpecs, toolChoice: "auto" as const }
         : {}),
     });
   }
@@ -1175,19 +1232,9 @@ export async function deleteThreadAction(threadId: string): Promise<AiResult> {
 
 // ── Permissions & memory (§8.1 / §9.3) ──────────────────────────────────────
 
-// Module-private by design: a "use server" file may only export async
-// functions, so this table must not be exported (it would break the whole
-// route at runtime with "can only export async functions, found object").
-const AI_SCOPES = [
-  { scope: "notes:read", labelAr: "قراءة الملاحظات", labelEn: "Read notes" },
-  { scope: "tasks:read", labelAr: "قراءة المهام", labelEn: "Read tasks" },
-  { scope: "calendar:read", labelAr: "قراءة التقويم", labelEn: "Read calendar" },
-  { scope: "projects:read", labelAr: "قراءة المشاريع", labelEn: "Read projects" },
-  { scope: "goals:read", labelAr: "قراءة الأهداف", labelEn: "Read goals" },
-  { scope: "tasks:write", labelAr: "إنشاء المهام", labelEn: "Create tasks" },
-  { scope: "memory:write", labelAr: "حفظ حقائق عني", labelEn: "Remember facts" },
-] as const;
+const AI_SCOPES = ALL_SCOPES;
 
+/** Every scope with its current grant state, for the settings panel. */
 export async function listPermissionsAction() {
   const user = await requireUser();
   const rows = await db
@@ -1197,6 +1244,15 @@ export async function listPermissionsAction() {
 
   const granted = new Set(rows.map((r) => r.scope));
   return AI_SCOPES.map((s) => ({ ...s, granted: granted.has(s.scope) }));
+}
+
+/** Just the granted scope keys — used to gate retrieval and tool writes. */
+export async function grantedScopes(userId: string): Promise<Set<string>> {
+  const rows = await db
+    .select({ scope: permissionGrants.scope })
+    .from(permissionGrants)
+    .where(and(eq(permissionGrants.userId, userId), eq(permissionGrants.granted, true)));
+  return new Set(rows.map((r) => r.scope));
 }
 
 export async function setPermissionAction(scope: string, granted: boolean): Promise<AiResult> {
@@ -1223,7 +1279,49 @@ export async function setPermissionAction(scope: string, granted: boolean): Prom
       },
     });
 
+  revalidatePath("/settings");
   revalidatePath("/settings/ai");
+  revalidatePath("/assistant");
+  return { ok: true };
+}
+
+/**
+ * Persist the whole permission set at once — the "Save" button in settings.
+ * Anything omitted is revoked, so the saved set is exactly what the user saw.
+ */
+export async function savePermissionsAction(scopes: string[]): Promise<AiResult> {
+  const user = await requireUser();
+
+  const wanted = new Set(scopes.filter((s) => AI_SCOPES.some((d) => d.scope === s)));
+  const now = new Date();
+
+  // One round trip: write a row per scope with the desired state.
+  await db
+    .insert(permissionGrants)
+    .values(
+      AI_SCOPES.map((def) => {
+        const granted = wanted.has(def.scope);
+        return {
+          userId: user.id,
+          scope: def.scope,
+          granted,
+          grantedAt: granted ? now : null,
+          revokedAt: granted ? null : now,
+        };
+      }),
+    )
+    .onConflictDoUpdate({
+      target: [permissionGrants.userId, permissionGrants.scope],
+      set: {
+        granted: sql`excluded.granted`,
+        grantedAt: sql`excluded.granted_at`,
+        revokedAt: sql`excluded.revoked_at`,
+      },
+    });
+
+  revalidatePath("/settings");
+  revalidatePath("/settings/ai");
+  revalidatePath("/assistant");
   return { ok: true };
 }
 

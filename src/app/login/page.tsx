@@ -3,7 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/session";
 import { AuthForm } from "@/components/auth-form";
-import { APP_NAME } from "@/lib/config";
+import { LogoLockup } from "@/components/logo";
 
 export const metadata: Metadata = { title: "Sign in" };
 
@@ -17,10 +17,7 @@ export default async function LoginPage() {
       <div className="flex flex-col justify-center px-6 py-12 sm:px-12 lg:px-16">
         <div className="mx-auto w-full max-w-sm">
           <Link href="/" className="mb-10 inline-flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600 text-sm font-bold text-white">
-              TN
-            </div>
-            <span className="text-[15px] font-semibold tracking-tight text-ink">{APP_NAME}</span>
+            <LogoLockup />
           </Link>
 
           <h1 className="text-2xl font-semibold tracking-tight text-ink">

@@ -22,30 +22,56 @@ import { cn } from "@/lib/utils";
 import { APP_NAME } from "@/lib/config";
 import { logoutAction } from "@/app/actions/auth";
 import { CommandPalette } from "@/components/command-palette";
+import { LogoMark } from "@/components/logo";
 import type { CurrentUser } from "@/lib/session";
 
 const NAV = [
-  { href: "/dashboard", labelAr: "لوحة اليوم", labelEn: "Today", Icon: Home },
-  { href: "/inbox", labelAr: "الوارد", labelEn: "Inbox", Icon: Inbox },
-  { href: "/tasks", labelAr: "المهام", labelEn: "Tasks", Icon: CheckSquare },
-  { href: "/notes", labelAr: "الملاحظات", labelEn: "Notes", Icon: NotebookPen },
-  { href: "/projects", labelAr: "المشاريع", labelEn: "Projects", Icon: Folder },
-  { href: "/calendar", labelAr: "التقويم", labelEn: "Calendar", Icon: Calendar },
-  { href: "/goals", labelAr: "الأهداف", labelEn: "Goals", Icon: Target },
-  { href: "/assistant", labelAr: "المساعد", labelEn: "Assistant", Icon: Sparkles },
-];
+  { href: "/dashboard", labelAr: "لوحة اليوم", labelEn: "Today", Icon: Home, countKey: null },
+  { href: "/inbox", labelAr: "الوارد", labelEn: "Inbox", Icon: Inbox, countKey: "inbox" },
+  { href: "/tasks", labelAr: "المهام", labelEn: "Tasks", Icon: CheckSquare, countKey: "tasks" },
+  { href: "/notes", labelAr: "الملاحظات", labelEn: "Notes", Icon: NotebookPen, countKey: "notes" },
+  { href: "/projects", labelAr: "المشاريع", labelEn: "Projects", Icon: Folder, countKey: "projects" },
+  { href: "/calendar", labelAr: "التقويم", labelEn: "Calendar", Icon: Calendar, countKey: "events" },
+  { href: "/goals", labelAr: "الأهداف", labelEn: "Goals", Icon: Target, countKey: "goals" },
+  { href: "/assistant", labelAr: "المساعد", labelEn: "Assistant", Icon: Sparkles, countKey: null },
+] as const;
+
+/** Live counts shown beside each section in the navigation. */
+export type NavCounts = {
+  inbox: number;
+  tasks: number;
+  notes: number;
+  projects: number;
+  events: number;
+  goals: number;
+};
 
 const MOBILE_NAV = NAV.filter((n) =>
   ["/dashboard", "/tasks", "/notes", "/calendar", "/assistant"].includes(n.href),
 );
 
+function CountBadge({ value, active }: { value: number; active: boolean }) {
+  if (value <= 0) return null;
+  return (
+    <span
+      className={cn(
+        "rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums",
+        active ? "bg-brand-600 text-white" : "bg-slate-100 text-ink-muted",
+      )}
+      aria-label={`${value}`}
+    >
+      {value > 99 ? "99+" : value}
+    </span>
+  );
+}
+
 export function AppShell({
   user,
-  inboxCount,
+  counts,
   children,
 }: {
   user: CurrentUser;
-  inboxCount: number;
+  counts: NavCounts;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -85,14 +111,12 @@ export function AppShell({
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 hidden w-64 shrink-0 border-e border-slate-200 bg-white lg:flex lg:flex-col">
         <div className="flex h-16 items-center gap-2.5 px-5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600 text-sm font-bold text-white shadow-sm">
-            TN
-          </div>
+          <LogoMark />
           <span className="text-[15px] font-semibold tracking-tight text-ink">{APP_NAME}</span>
         </div>
 
         <nav className="flex-1 space-y-0.5 px-3 py-2" aria-label={t("التنقل الرئيسي", "Main navigation")}>
-          {NAV.map(({ href, labelAr, labelEn, Icon }) => {
+          {NAV.map(({ href, labelAr, labelEn, Icon, countKey }) => {
             const active = isActive(href);
             return (
               <Link
@@ -108,11 +132,7 @@ export function AppShell({
               >
                 <Icon className={cn("h-[18px] w-[18px]", active ? "text-brand-600" : "text-ink-faint group-hover:text-ink-muted")} aria-hidden />
                 <span className="flex-1">{t(labelAr, labelEn)}</span>
-                {href === "/inbox" && inboxCount > 0 ? (
-                  <span className="rounded-full bg-brand-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                    {inboxCount > 99 ? "99+" : inboxCount}
-                  </span>
-                ) : null}
+                {countKey ? <CountBadge value={counts[countKey]} active={active} /> : null}
               </Link>
             );
           })}
@@ -175,9 +195,7 @@ export function AppShell({
           <aside className="absolute inset-y-0 start-0 flex w-72 flex-col bg-white shadow-pop">
             <div className="flex h-16 items-center justify-between px-5">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600 text-sm font-bold text-white">
-                  TN
-                </div>
+                <LogoMark />
                 <span className="text-[15px] font-semibold text-ink">{APP_NAME}</span>
               </div>
               <button
@@ -190,7 +208,7 @@ export function AppShell({
               </button>
             </div>
             <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
-              {NAV.map(({ href, labelAr, labelEn, Icon }) => {
+              {NAV.map(({ href, labelAr, labelEn, Icon, countKey }) => {
                 const active = isActive(href);
                 return (
                   <Link
@@ -203,11 +221,7 @@ export function AppShell({
                   >
                     <Icon className="h-[18px] w-[18px]" aria-hidden />
                     <span className="flex-1">{t(labelAr, labelEn)}</span>
-                    {href === "/inbox" && inboxCount > 0 ? (
-                      <span className="rounded-full bg-brand-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                        {inboxCount}
-                      </span>
-                    ) : null}
+                    {countKey ? <CountBadge value={counts[countKey]} active={active} /> : null}
                   </Link>
                 );
               })}

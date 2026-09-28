@@ -5,13 +5,14 @@ import { devices, sessions } from "@/db/schema";
 import { requireUser } from "@/lib/session";
 import { SettingsView } from "@/components/settings-view";
 import { aiStatus } from "@/lib/ai/gateway";
+import { grantedScopes } from "@/app/actions/ai";
 
 export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
   const user = await requireUser();
 
-  const [deviceRows, sessionRows] = await Promise.all([
+  const [deviceRows, sessionRows, grants] = await Promise.all([
     db
       .select()
       .from(devices)
@@ -24,6 +25,7 @@ export default async function SettingsPage() {
       .where(and(eq(sessions.userId, user.id), isNull(sessions.revokedAt)))
       .orderBy(desc(sessions.lastSeenAt))
       .limit(20),
+    grantedScopes(user.id),
   ]);
 
   const status = aiStatus();
@@ -36,6 +38,8 @@ export default async function SettingsPage() {
         provider: status.provider,
         model: status.model,
         label: status.label,
+        chain: status.chain,
+        providerCount: status.providerCount,
       }}
       profile={{
         displayName: user.displayName,
@@ -53,6 +57,7 @@ export default async function SettingsPage() {
         lastSeenAt: d.lastSeenAt.toISOString(),
         isCurrent: sessionRows.some((s) => s.deviceId === d.id && s.id === user.sessionId),
       }))}
+      granted={[...grants]}
     />
   );
 }

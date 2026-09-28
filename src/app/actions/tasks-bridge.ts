@@ -49,6 +49,7 @@ import {
   listPermissionsAction,
   listThreadsAction,
   parseQuickAddAction,
+  savePermissionsAction,
   setPermissionAction,
   suggestCaptureDestinationAction,
   summarizeNoteAction,
@@ -231,6 +232,11 @@ export async function listPermissions() {
 
 export async function setPermission(scope: string, granted: boolean) {
   return setPermissionAction(scope, granted);
+}
+
+/** Persist the whole permission set at once (the settings Save button). */
+export async function savePermissions(scopes: string[]) {
+  return savePermissionsAction(scopes);
 }
 
 export async function listMemory() {

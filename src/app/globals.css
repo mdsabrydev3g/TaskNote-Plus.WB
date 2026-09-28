@@ -7,19 +7,65 @@
     --font-sans: "Inter", "Cairo", "Noto Sans Arabic", system-ui, sans-serif;
     --brand: 99 102 241;
     --accent: 6 182 212;
+
+    /* ── Semantic surface tokens ──────────────────────────────────────────
+       Components reference these instead of raw slate/white so the whole app
+       adapts to `.dark` without a per-component dark: variant. */
+    --bg-app: 248 250 252;        /* page background            */
+    --bg-surface: 255 255 255;    /* cards, panels, sidebar     */
+    --bg-subtle: 248 250 252;     /* secondary fills            */
+    --bg-muted: 241 245 249;      /* tertiary fills, hovers     */
+    --bg-hover: 241 245 249;      /* interactive hover          */
+    --bg-inset: 226 232 240;      /* pressed / track            */
+
+    --border: 226 232 240;        /* default hairline           */
+    --border-strong: 203 213 225;  /* emphasised border         */
+
+    --ink: 15 23 42;              /* primary text               */
+    --ink-soft: 51 65 85;         /* secondary text             */
+    --ink-muted: 100 116 139;     /* tertiary text              */
+    --ink-faint: 148 163 184;     /* placeholder / disabled     */
+
+    --ring-offset: 255 255 255;
+  }
+
+  .dark {
+    --bg-app: 11 15 25;           /* deep slate-950-ish          */
+    --bg-surface: 20 26 38;       /* raised card                 */
+    --bg-subtle: 26 33 47;
+    --bg-muted: 33 41 57;
+    --bg-hover: 38 47 64;
+    --bg-inset: 51 61 80;
+
+    --border: 41 51 69;
+    --border-strong: 60 72 93;
+
+    --ink: 237 241 247;           /* near-white, high contrast   */
+    --ink-soft: 203 213 225;
+    --ink-muted: 148 163 184;
+    --ink-faint: 113 128 150;
+
+    --ring-offset: 20 26 38;
   }
 
   * {
-    @apply border-slate-200;
+    border-color: rgb(var(--border));
   }
 
   html {
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
   }
 
   body {
-    @apply bg-slate-50 text-ink antialiased;
+    background-color: rgb(var(--bg-app));
+    color: rgb(var(--ink));
+    @apply antialiased;
     font-feature-settings: "cv11", "ss01";
     text-rendering: optimizeLegibility;
   }
@@ -38,21 +84,30 @@
 
   /* Keyboard focus is always visible — §15.2 full keyboard navigation. */
   :focus-visible {
-    @apply outline-none ring-2 ring-brand-500/70 ring-offset-2 ring-offset-white;
+    @apply outline-none ring-2 ring-brand-500/70 ring-offset-2;
+    --tw-ring-offset-color: rgb(var(--ring-offset));
   }
 
   ::selection {
-    @apply bg-brand-100 text-brand-900;
+    @apply bg-brand-500/30;
+    color: rgb(var(--ink));
   }
 }
 
 @layer components {
   .card {
-    @apply rounded-2xl border border-slate-200 bg-white shadow-card;
+    @apply rounded-2xl border shadow-card;
+    background-color: rgb(var(--bg-surface));
+    border-color: rgb(var(--border));
   }
 
   .card-interactive {
-    @apply card transition-all duration-150 hover:border-slate-300 hover:shadow-lift;
+    @apply card transition-all duration-150;
+  }
+
+  .card-interactive:hover {
+    border-color: rgb(var(--border-strong));
+    @apply shadow-lift;
   }
 
   .btn {
@@ -65,21 +120,35 @@
   }
 
   .btn-secondary {
-    @apply btn border border-slate-200 bg-white text-ink-soft hover:border-slate-300 hover:bg-slate-50 active:scale-[0.985];
+    @apply btn border text-ink-soft active:scale-[0.985];
+    background-color: rgb(var(--bg-surface));
+    border-color: rgb(var(--border));
+  }
+
+  .btn-secondary:hover {
+    background-color: rgb(var(--bg-hover));
+    border-color: rgb(var(--border-strong));
   }
 
   .btn-ghost {
-    @apply btn text-ink-muted hover:bg-slate-100 hover:text-ink;
+    @apply btn text-ink-muted;
+  }
+
+  .btn-ghost:hover {
+    background-color: rgb(var(--bg-hover));
+    color: rgb(var(--ink));
   }
 
   .btn-danger {
-    @apply btn bg-red-50 text-red-600 hover:bg-red-100;
+    @apply btn bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-950/40 dark:text-red-400 dark:hover:bg-red-950/70;
   }
 
   .input {
-    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-ink
+    @apply w-full rounded-xl border px-3.5 py-2.5 text-sm text-ink
            placeholder:text-ink-faint transition-colors
            focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    background-color: rgb(var(--bg-surface));
+    border-color: rgb(var(--border));
   }
 
   .label {
@@ -91,7 +160,14 @@
   }
 
   .skeleton {
-    @apply animate-pulse rounded-lg bg-slate-200/70;
+    @apply animate-pulse rounded-lg;
+    background-color: rgb(var(--bg-inset) / 0.7);
+  }
+
+  /* `white` is remapped to the surface token so `bg-white` themes correctly.
+     `text-white` always sits on a brand/status fill, so pin it to pure white. */
+  .text-white {
+    color: #ffffff;
   }
 
   /* Arabic gets slightly more line-height; its letterforms need the room. */
@@ -107,7 +183,7 @@
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: rgb(203 213 225) transparent;
+    scrollbar-color: rgb(var(--border-strong)) transparent;
   }
 
   .scrollbar-thin::-webkit-scrollbar {
@@ -116,11 +192,40 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-slate-300;
+    @apply rounded-full;
+    background-color: rgb(var(--border-strong));
   }
 
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
+  }
+
+  .bg-app {
+    background-color: rgb(var(--bg-app));
+  }
+
+  .bg-surface {
+    background-color: rgb(var(--bg-surface));
+  }
+
+  .bg-subtle {
+    background-color: rgb(var(--bg-subtle));
+  }
+
+  .bg-muted {
+    background-color: rgb(var(--bg-muted));
+  }
+
+  .bg-hover {
+    background-color: rgb(var(--bg-hover));
+  }
+
+  .border-hairline {
+    border-color: rgb(var(--border));
+  }
+
+  .divide-hairline > * + * {
+    border-color: rgb(var(--border));
   }
 
   .safe-bottom {
@@ -144,4 +249,70 @@
   body {
     overscroll-behavior-y: contain;
   }
+}
+
+/* ── Dark-mode adjustments for pastel status tints ───────────────────────────
+   Components use light pastel fills (brand-50, emerald-50, amber-50, red-50)
+   for badges and banners. Those are unreadable on a dark surface, so in dark
+   mode we swap them for translucent fills of the same hue and lift the text to
+   a legible shade. Kept here rather than as `dark:` variants on ~50 call sites
+   so the palette stays in one place. */
+.dark .bg-brand-50 {
+  background-color: rgb(99 102 241 / 0.16);
+}
+.dark .bg-brand-100 {
+  background-color: rgb(99 102 241 / 0.24);
+}
+.dark .bg-emerald-50 {
+  background-color: rgb(16 185 129 / 0.16);
+}
+.dark .bg-emerald-100 {
+  background-color: rgb(16 185 129 / 0.24);
+}
+.dark .bg-amber-50 {
+  background-color: rgb(245 158 11 / 0.16);
+}
+.dark .bg-amber-100 {
+  background-color: rgb(245 158 11 / 0.24);
+}
+.dark .bg-red-50 {
+  background-color: rgb(239 68 68 / 0.16);
+}
+.dark .bg-red-100 {
+  background-color: rgb(239 68 68 / 0.24);
+}
+.dark .bg-blue-50 {
+  background-color: rgb(59 130 246 / 0.16);
+}
+
+.dark .text-brand-700 {
+  color: #a5b4fc;
+}
+.dark .text-brand-600 {
+  color: #818cf8;
+}
+.dark .text-emerald-600,
+.dark .text-emerald-700 {
+  color: #34d399;
+}
+.dark .text-amber-600,
+.dark .text-amber-700 {
+  color: #fbbf24;
+}
+.dark .text-red-600,
+.dark .text-red-700 {
+  color: #f87171;
+}
+
+/* Status borders read too dark against a dark fill. */
+.dark .border-emerald-500\/30,
+.dark .border-amber-500\/30,
+.dark .border-red-500\/30 {
+  border-color: rgb(255 255 255 / 0.12);
+}
+
+/* Keep the translucent header/nav surfaces legible over dark content. */
+.dark .backdrop-blur-md,
+.dark .backdrop-blur-sm {
+  backdrop-filter: blur(12px);
 }

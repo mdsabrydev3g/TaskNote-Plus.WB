@@ -16,29 +16,21 @@ import {
   User,
 } from "lucide-react";
 import { updateProfileAction, changePasswordAction, revokeDeviceAction } from "@/app/actions/auth";
-import { setPermission as setPermissionAction } from "@/app/actions/tasks-bridge";
+import { savePermissions } from "@/app/actions/tasks-bridge";
 import { useToast } from "@/components/providers/toast-provider";
 import { useTheme } from "@/components/providers/theme-provider";
 import { PageHeader } from "@/components/ui";
+import { SCOPE_AREAS, ALL_SCOPES } from "@/lib/ai/scopes";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
 type Tab = "profile" | "appearance" | "ai" | "security";
-
-const AI_SCOPES_LIST = [
-  { scope: "notes:read", ar: "قراءة الملاحظات", en: "Read notes" },
-  { scope: "tasks:read", ar: "قراءة المهام", en: "Read tasks" },
-  { scope: "calendar:read", ar: "قراءة التقويم", en: "Read calendar" },
-  { scope: "projects:read", ar: "قراءة المشاريع", en: "Read projects" },
-  { scope: "goals:read", ar: "قراءة الأهداف", en: "Read goals" },
-  { scope: "tasks:write", ar: "إنشاء مهام نيابةً عنك", en: "Create tasks on your behalf" },
-  { scope: "memory:write", ar: "حفظ حقائق عنك", en: "Remember facts about you" },
-];
 
 export function SettingsView({
   isArabic,
   profile,
   devices,
   aiStatus,
+  granted,
 }: {
   isArabic: boolean;
   profile: {
@@ -51,7 +43,16 @@ export function SettingsView({
     theme: string;
   };
   devices: Array<{ id: string; name: string; platform: string; lastSeenAt: string; isCurrent: boolean }>;
-  aiStatus: { available: boolean; provider: string; model: string; label: string };
+  aiStatus: {
+    available: boolean;
+    provider: string;
+    model: string;
+    label: string;
+    chain?: string[];
+    providerCount?: number;
+  };
+  /** Scope keys the server currently has granted for this user. */
+  granted: string[];
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -62,11 +63,54 @@ export function SettingsView({
   const [timezone, setTimezone] = useState(profile.timezone);
   const [calendarSystem, setCalendarSystem] = useState(profile.calendarSystem);
   const [weekStartsOn, setWeekStartsOn] = useState(String(profile.weekStartsOn));
-  const [grantedScopes, setGrantedScopes] = useState<Set<string>>(new Set(["notes:read", "tasks:read"]));
+  // Draft permissions, saved explicitly with the Save button below.
+  const [draftScopes, setDraftScopes] = useState<Set<string>>(new Set(granted));
+  const [savedScopes, setSavedScopes] = useState<Set<string>>(new Set(granted));
+  const [permissionsDirty, setPermissionsDirty] = useState(false);
   const [isSaving, startSaveTransition] = useTransition();
+  const [isSavingPermissions, startPermissionsTransition] = useTransition();
   const [busyDevice, setBusyDevice] = useState<string | null>(null);
 
   const t = (ar: string, en: string) => (isArabic ? ar : en);
+
+  const toggleDraft = (scope: string) => {
+    setDraftScopes((prev) => {
+      const next = new Set(prev);
+      if (next.has(scope)) next.delete(scope);
+      else next.add(scope);
+      return next;
+    });
+    setPermissionsDirty(true);
+  };
+
+  /** Turn a whole area on/off in one click. */
+  const toggleArea = (area: string) => {
+    const areaScopes = ALL_SCOPES.filter((s) => s.area === area).map((s) => s.scope);
+    if (area === "notes") areaScopes.push("memory:write");
+    setDraftScopes((prev) => {
+      const next = new Set(prev);
+      const allOn = areaScopes.every((s) => next.has(s));
+      areaScopes.forEach((s) => (allOn ? next.delete(s) : next.add(s)));
+      return next;
+    });
+    setPermissionsDirty(true);
+  };
+
+  const savePermissionsNow = () => {
+    startPermissionsTransition(async () => {
+      const result = await savePermissions([...draftScopes]);
+      if (result.ok) {
+        setSavedScopes(new Set(draftScopes));
+        setPermissionsDirty(false);
+        toast.success(
+          t("حُفظت صلاحيات المساعد", "Assistant permissions saved"),
+          t("سيُطبَّق ذلك على كل محادثة جديدة.", "Applies to every new conversation."),
+        );
+      } else {
+        toast.error(t("تعذّر الحفظ", "Could not save"), result.error);
+      }
+    });
+  };
 
   const saveProfile = () => {
     startSaveTransition(async () => {
@@ -83,22 +127,6 @@ export function SettingsView({
         router.refresh();
       } else {
         toast.error(t("تعذّر الحفظ", "Could not save"), result.error);
-      }
-    });
-  };
-
-  const toggleScope = (scope: string) => {
-    const next = !grantedScopes.has(scope);
-    setGrantedScopes((prev) => {
-      const copy = new Set(prev);
-      if (next) copy.add(scope);
-      else copy.delete(scope);
-      return copy;
-    });
-    startSaveTransition(async () => {
-      const result = await setPermissionAction(scope, next);
-      if (!result.ok) {
-        toast.error(t("تعذّر التحديث", "Could not update the permission"), result.error);
       }
     });
   };
@@ -331,9 +359,35 @@ export function SettingsView({
                     : t("لا يوجد مزوّد مُهيّأ", "No provider configured")}
                 </h2>
                 {aiStatus.available ? (
-                  <p className="mt-0.5 text-[11px] text-ink-faint" dir="ltr">
-                    {aiStatus.model}
-                  </p>
+                  <div className="mt-1.5 space-y-2">
+                    <p className="text-[11px] text-ink-faint" dir="ltr">
+                      {aiStatus.model}
+                    </p>
+                    <div className="rounded-lg bg-surface-subtle px-2.5 py-2">
+                      <p className="text-[10px] font-medium text-ink-soft">
+                        {t("التبديل التلقائي بين الموديلات المجانية", "Automatic free-model failover")}
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-ink-faint">
+                        {t(
+                          `${aiStatus.chain?.length ?? 1} موديل مجاني عبر ${aiStatus.providerCount ?? 1} مزوّد — لو تعطّل أي موديل ينتقل للتالي تلقائياً.`,
+                          `${aiStatus.chain?.length ?? 1} free models across ${aiStatus.providerCount ?? 1} provider${(aiStatus.providerCount ?? 1) === 1 ? "" : "s"} — if one is down or rate-limited it switches automatically.`,
+                        )}
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap gap-1" dir="ltr">
+                        {(aiStatus.chain ?? []).slice(0, 8).map((m, i) => (
+                          <span
+                            key={m}
+                            className={cn(
+                              "rounded px-1.5 py-0.5 font-mono text-[9px]",
+                              i === 0 ? "bg-brand-100 text-brand-700" : "bg-slate-100 text-ink-faint",
+                            )}
+                          >
+                            {m}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 ) : (
                   <div className="mt-2 space-y-1.5 text-[11px] leading-relaxed text-ink-muted">
                     <p>
@@ -364,45 +418,138 @@ export function SettingsView({
             <h2 className="mb-1 text-xs font-semibold text-ink">{t("صلاحيات المساعد", "Assistant permissions")}</h2>
             <p className="mb-4 text-[11px] leading-relaxed text-ink-muted">
               {t(
-                "تحكّم بدقة فيما يمكن للمساعد قراءته أو كتابته. يمكنك سحب أي صلاحية في أي وقت.",
-                "Control exactly what the assistant may read or write. Any permission can be revoked at any time.",
+                "اختر بنفسك ما يطّلع عليه المساعد وما يمكنه إنشاؤه. لا شيء مُفعَّل تلقائياً — أنت من يمنح كل صلاحية، واضغط حفظ ليُسجَّل اختيارك.",
+                "Choose exactly what the assistant may see and create. Nothing is on by default — you grant each permission, then press Save to record it.",
               )}
             </p>
 
-            <ul className="space-y-1">
-              {AI_SCOPES_LIST.map(({ scope, ar, en }) => {
-                const granted = grantedScopes.has(scope);
+            <ul className="space-y-2">
+              {SCOPE_AREAS.map(({ area, labelAr, labelEn, descAr, descEn }) => {
+                const readDef = ALL_SCOPES.find((s) => s.area === area && s.kind === "read");
+                const writeDef = ALL_SCOPES.find((s) => s.area === area && s.kind === "write");
+                const readOn = readDef ? draftScopes.has(readDef.scope) : false;
+                const writeOn = writeDef ? draftScopes.has(writeDef.scope) : false;
+
                 return (
-                  <li key={scope}>
-                    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl px-3 py-2.5 transition-colors hover:bg-slate-50">
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-xs font-medium text-ink">{t(ar, en)}</span>
-                        <span className="block font-mono text-[10px] text-ink-faint" dir="ltr">
-                          {scope}
-                        </span>
-                      </span>
+                  <li
+                    key={area}
+                    className="rounded-xl border border-slate-200 px-3 py-2.5 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-ink">{t(labelAr, labelEn)}</p>
+                        <p className="mt-0.5 text-[11px] text-ink-faint">{t(descAr, descEn)}</p>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => toggleScope(scope)}
-                        role="switch"
-                        aria-checked={granted}
-                        className={cn(
-                          "relative h-6 w-11 shrink-0 rounded-full transition-colors",
-                          granted ? "bg-brand-600" : "bg-slate-300",
-                        )}
+                        onClick={() => toggleArea(area)}
+                        className="shrink-0 rounded-lg px-2 py-1 text-[10px] font-medium text-brand-600 transition-colors hover:bg-brand-50"
                       >
-                        <span
-                          className={cn(
-                            "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-all",
-                            granted ? "start-[22px]" : "start-0.5",
-                          )}
-                        />
+                        {readOn || writeOn ? t("إيقاف الكل", "Clear") : t("تفعيل الكل", "Enable all")}
                       </button>
-                    </label>
+                    </div>
+
+                    <div className="mt-2.5 flex flex-wrap gap-2">
+                      {[
+                        { def: readDef, on: readOn },
+                        { def: writeDef, on: writeOn },
+                      ]
+                        .filter((x): x is { def: typeof readDef; on: boolean } => Boolean(x.def))
+                        .map(({ def, on }) => (
+                          <button
+                            key={def!.scope}
+                            type="button"
+                            onClick={() => toggleDraft(def!.scope)}
+                            role="switch"
+                            aria-checked={on}
+                            className={cn(
+                              "inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors",
+                              on
+                                ? "border-brand-500 bg-brand-50 text-brand-700"
+                                : "border-slate-200 text-ink-muted hover:border-slate-300",
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border transition-colors",
+                                on ? "border-brand-600 bg-brand-600" : "border-slate-300",
+                              )}
+                            >
+                              {on ? <Check className="h-2.5 w-2.5 text-white" aria-hidden /> : null}
+                            </span>
+                            <span dir="ltr">{def!.kind === "read" ? t("قراءة", "Read") : t("إنشاء وتعديل", "Create & edit")}</span>
+                          </button>
+                        ))}
+                    </div>
                   </li>
                 );
               })}
             </ul>
+
+            <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-xl px-3 py-2.5 transition-colors hover:bg-slate-50">
+              <button
+                type="button"
+                onClick={() => toggleDraft("memory:write")}
+                role="switch"
+                aria-checked={draftScopes.has("memory:write")}
+                className={cn(
+                  "relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition-colors",
+                  draftScopes.has("memory:write") ? "bg-brand-600" : "bg-slate-300",
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-all",
+                    draftScopes.has("memory:write") ? "start-[22px]" : "start-0.5",
+                  )}
+                />
+              </button>
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-medium text-ink">
+                  {t("حفظ حقائق عنك", "Remember facts about you")}
+                </span>
+                <span className="block text-[11px] text-ink-faint">
+                  {t(
+                    "يتذكّر تفضيلاتك بين المحادثات.",
+                    "Recalls your preferences across conversations.",
+                  )}
+                </span>
+              </span>
+            </label>
+
+            {/* Save bar — the user confirms the grant set before it takes effect. */}
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-4">
+              <p className="text-[11px] text-ink-faint">
+                {permissionsDirty
+                  ? t("لديك تغييرات غير محفوظة.", "You have unsaved changes.")
+                  : t(
+                      `محفوظ · ${savedScopes.size} صلاحية مفعّلة`,
+                      `Saved · ${savedScopes.size} permission${savedScopes.size === 1 ? "" : "s"} enabled`,
+                    )}
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftScopes(new Set());
+                    setPermissionsDirty(true);
+                  }}
+                  className="btn-secondary text-[11px]"
+                  disabled={draftScopes.size === 0}
+                >
+                  {t("إلغاء الكل", "Disable all")}
+                </button>
+                <button
+                  type="button"
+                  onClick={savePermissionsNow}
+                  disabled={isSavingPermissions || !permissionsDirty}
+                  className="btn-primary text-[11px]"
+                >
+                  {isSavingPermissions ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+                  {t("حفظ", "Save")}
+                </button>
+              </div>
+            </div>
           </div>
 
           <Link href="/settings/activity" className="card-interactive flex items-center gap-3 p-4">

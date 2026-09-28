@@ -1,5 +1,13 @@
 import type { Config } from "tailwindcss";
 
+/**
+ * Every neutral colour resolves through a CSS variable defined in globals.css
+ * and flipped by `.dark`, so existing `bg-white` / `text-slate-500` /
+ * `border-slate-200` classes adapt to the dark theme without per-component
+ * `dark:` variants. Brand/accent stay literal.
+ */
+const v = (name: string) => `rgb(var(${name}) / <alpha-value>)`;
+
 const config: Config = {
   darkMode: "class",
   content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
@@ -30,20 +38,45 @@ const config: Config = {
           600: "#0891b2",
           700: "#0e7490",
         },
+
+        // ── Themed neutrals ────────────────────────────────────────────────
+        // `white` collapses to the raised-surface token so `bg-white` becomes
+        // the card colour in dark mode. `text-white` must stay pure white
+        // (it always sits on a brand/status fill), so it is overridden below.
+        white: v("--bg-surface"),
+        "pure-white": "#ffffff",
         surface: {
-          DEFAULT: "#ffffff",
-          subtle: "#f8fafc",
-          muted: "#f1f5f9",
-          border: "#e2e8f0",
+          DEFAULT: v("--bg-surface"),
+          subtle: v("--bg-subtle"),
+          muted: v("--bg-muted"),
+          inset: v("--bg-inset"),
+          border: v("--border"),
         },
         ink: {
-          DEFAULT: "#0f172a",
-          soft: "#334155",
-          muted: "#64748b",
-          faint: "#94a3b8",
+          DEFAULT: v("--ink"),
+          soft: v("--ink-soft"),
+          muted: v("--ink-muted"),
+          faint: v("--ink-faint"),
         },
-        // Semantic states (Chinese-market convention for finance is not relevant here;
-        // these are productivity status colors)
+
+        // The slate scale is remapped onto the semantic tokens. Components use
+        // slate-50/100/200 for fills, borders and muted text, so routing them
+        // through the tokens is what makes dark mode work globally.
+        slate: {
+          50: v("--bg-subtle"),
+          100: v("--bg-muted"),
+          200: v("--border"),
+          300: v("--border-strong"),
+          400: v("--ink-faint"),
+          500: v("--ink-muted"),
+          600: v("--ink-muted"),
+          700: v("--ink-soft"),
+          800: v("--ink-soft"),
+          900: v("--ink"),
+          950: v("--ink"),
+        },
+
+        // Semantic states (productivity status colours — not finance)
         success: "#10b981",
         warning: "#f59e0b",
         danger: "#ef4444",

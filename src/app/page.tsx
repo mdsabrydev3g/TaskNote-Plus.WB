@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/session";
 import { APP_NAME } from "@/lib/config";
+import { LogoLockup } from "@/components/logo";
 
 export default async function LandingPage() {
   const user = await getCurrentUser().catch(() => null);
@@ -28,10 +29,7 @@ export default async function LandingPage() {
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600 text-sm font-bold text-white">
-              TN
-            </div>
-            <span className="text-[15px] font-semibold tracking-tight text-ink">{APP_NAME}</span>
+            <LogoLockup />
           </div>
           <div className="flex items-center gap-2">
             <Link href="/login" className="btn-ghost">
